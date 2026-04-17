@@ -1,0 +1,75 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap");
+
+:root {
+  --tw-color-primary: #0ea5e9;
+}
+
+* {
+  font-family: "Inter", system-ui, sans-serif;
+}
+
+.nav-active {
+  border-bottom: 3px solid #0ea5e9;
+  color: #0ea5e9;
+}
+
+.camera-box {
+  background: linear-gradient(90deg, #0ea5e9, #3b82f6);
+  border-radius: 20px;
+  overflow: hidden;
+  box-shadow: 0 25px 50px -12px rgb(14 165 233 / 0.55);
+}
+
+.scan-overlay {
+  animation: scan 2s linear infinite;
+}
+
+.modal {
+  animation: modalPop 0.3s ease-out;
+}
+
+.match-card {
+  transition:
+    transform 160ms ease,
+    border-color 160ms ease,
+    background-color 160ms ease;
+}
+
+.match-card:hover {
+  transform: translateY(-2px);
+}
+
+@keyframes scan {
+  0% {
+    transform: translateY(-100%);
+  }
+
+  100% {
+    transform: translateY(300%);
+  }
+}
+
+@keyframes modalPop {
+  0% {
+    opacity: 0;
+    transform: scale(0.92) translateY(12px);
+  }
+
+  100% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@media (max-width: 1024px) {
+  .nav-active {
+    border-bottom-width: 2px;
+  }
+}
+
+@media (max-width: 640px) {
+  #attendance-camera-box,
+  #register-video {
+    min-height: 240px;
+  }
+}
