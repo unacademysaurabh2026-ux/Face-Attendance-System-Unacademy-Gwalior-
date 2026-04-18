@@ -5,188 +5,87 @@
 //    CSV & PDF export
 // ============================================================
 
-// ─── Firebase Setup ──────────────────────────────────────────
-// 🔧 REPLACE these values with your own Firebase project config
-// Get them from: https://console.firebase.google.com → Project Settings → Your Apps
-const firebaseConfig = {
-  apiKey: "AIzaSyCJTZz7J2IXOiWUpvIQmuVwZCoyMOwrdZM",
-  authDomain: "face-scan-attendance-1419b.firebaseapp.com",
-  projectId: "face-scan-attendance-1419b",
-  storageBucket: "face-scan-attendance-1419b.firebasestorage.app",
-  messagingSenderId: "666886640084",
-  appId: "1:666886640084:web:33adaa3110708202120641",
-  measurementId: "G-QRC6FNHTVL"
-};
+// ─── Google Sheets Backend ───────────────────────────────────
+const SHEETS_URL = "https://script.google.com/macros/s/AKfycbyDqArdI88Q2LrLaXx38EbtfKXSYLIWRlnhyU3r1ad6-Enytzsy6y9kE5njaO0sLF5pbg/exec";
 
-// Guard: detect unconfigured placeholder credentials before attempting to connect.
-// Returns true if the config still has default placeholder values.
-function isFirebaseConfigPlaceholder() {
-  return (
-    !firebaseConfig.apiKey ||
-    firebaseConfig.apiKey === "YOUR_API_KEY" ||
-    firebaseConfig.projectId === "YOUR_PROJECT_ID"
-  );
-}
-
-// Firebase SDK modules (loaded via CDN in index.html)
-let db = null;   // Firestore instance – set in initFirebase()
-
-async function initFirebase() {
-  // Fail fast with a clear message if developer hasn't replaced placeholder credentials.
-  if (isFirebaseConfigPlaceholder()) {
-    console.warn(
-      "⚠️ Firebase config has placeholder values. " +
-      "Open app.js and replace FIREBASE_CONFIG with your real project credentials. " +
-      "Falling back to localStorage."
-    );
-    if (typeof window.setFirebaseStatus === "function") window.setFirebaseStatus(false);
-    return false;
-  }
-
+// POST to Google Sheets Apps Script
+async function sheetsPost(action, payload) {
   try {
-    const { initializeApp }   = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js");
-    const { getFirestore, collection, doc, setDoc, getDocs, deleteDoc, addDoc, query, orderBy, onSnapshot }
-      = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js");
-
-    const app = initializeApp(firebaseConfig);
-    db = getFirestore(app);
-
-    // Expose Firestore helpers onto a single namespace so the rest of the
-    // file can reach them without extra imports later.
-    window._fs = { collection, doc, setDoc, getDocs, deleteDoc, addDoc, query, orderBy, onSnapshot };
-
-    console.log("✅ Firebase connected.");
-    if (typeof window.setFirebaseStatus === "function") window.setFirebaseStatus(true);
-    return true;
+    await fetch(SHEETS_URL, {
+      method: "POST",
+      mode: "no-cors",
+      headers: { "Content-Type": "text/plain" },
+      body: JSON.stringify({ action, ...payload }),
+    });
   } catch (err) {
-    console.error("❌ Firebase init failed:", err);
-    if (typeof window.setFirebaseStatus === "function") window.setFirebaseStatus(false);
-    return false;
+    console.error("Sheets POST error:", err);
   }
 }
 
-// ─── Firebase: Students ──────────────────────────────────────
-async function saveStudentToFirebase(student) {
-  if (!db) return;
+// GET all data from Google Sheets
+async function sheetsGet() {
   try {
-    const { doc, setDoc } = window._fs;
-
-    // Firestore rules:
-    // 1. NO nested arrays — serialize Float32Arrays as comma-joined strings
-    // 2. NO large base64 photos — strip facePhoto and angleData photos (Firestore 1MB limit)
-    // 3. Only store what's needed for recognition and display across devices
-    const serializeDesc = d => {
-      if (!d) return null;
-      try { return Array.from(d).join(","); } catch(e) { return null; }
-    };
-
-    const payload = {
-      id:           String(student.id || ""),
-      name:         String(student.name || ""),
-      roll:         String(student.roll || ""),
-      class:        String(student.class || ""),
-      studentPhone: String(student.studentPhone || ""),
-      parentPhone:  String(student.parentPhone || ""),
-      embeddingCount: Number(student.embeddingCount || 0),
-      registeredOn: String(student.registeredOn || new Date().toISOString()),
-      updatedOn:    String(student.updatedOn || new Date().toISOString()),
-      facePhoto:    "",  // intentionally empty — too large for Firestore
-      descriptors:  (student.descriptors || []).map(serializeDesc).filter(Boolean),
-      descriptor:   serializeDesc(student.descriptor),
-      angleData:    student.angleData
-        ? Object.fromEntries(
-            Object.entries(student.angleData).map(([k, v]) => [
-              k, v ? { count: Number(v.count || 0) } : null,
-            ])
-          )
-        : null,
-    };
-
-    await setDoc(doc(db, "students", student.id), payload);
-    console.log("✅ Student saved to Firestore:", student.id, "descriptors:", payload.descriptors.length);
+    const res  = await fetch(SHEETS_URL);
+    const data = await res.json();
+    if (data.ok) return data;
+    console.error("Sheets GET error:", data.error);
+    return null;
   } catch (err) {
-    console.error("❌ saveStudentToFirebase error:", err.code, err.message);
+    console.error("Sheets GET error:", err);
+    return null;
   }
 }
 
-async function loadStudentsFromFirebase() {
-  if (!db) return [];
-  try {
-    const { collection, getDocs } = window._fs;
-    const snapshot = await getDocs(collection(db, "students"));
-    return snapshot.docs.map(d => normalizeStudent(d.data()));
-  } catch (err) {
-    console.error("loadStudentsFromFirebase error:", err);
-    return [];
-  }
+async function saveStudentToSheets(student) {
+  const serializeDesc = d => {
+    if (!d) return [];
+    try { return Array.from(d); } catch(e) { return []; }
+  };
+  await sheetsPost("saveStudent", {
+    student: {
+      id:            student.id,
+      name:          student.name,
+      roll:          student.roll,
+      class:         student.class,
+      studentPhone:  student.studentPhone || "",
+      parentPhone:   student.parentPhone  || "",
+      embeddingCount:student.embeddingCount || 0,
+      descriptor:    serializeDesc(student.descriptor),
+      descriptors:   (student.descriptors || []).map(serializeDesc),
+      registeredOn:  student.registeredOn || new Date().toISOString(),
+    }
+  });
+  console.log("✅ Student saved to Sheets:", student.name);
 }
 
-async function deleteStudentFromFirebase(studentId) {
-  if (!db) return;
-  try {
-    const { doc, deleteDoc } = window._fs;
-    await deleteDoc(doc(db, "students", studentId));
-  } catch (err) {
-    console.error("deleteStudentFromFirebase error:", err);
-  }
+async function saveAttendanceToSheets(record) {
+  await sheetsPost("saveAttendance", { record });
+  console.log("✅ Attendance saved to Sheets:", record.name);
 }
 
-// ─── Firebase: Attendance ────────────────────────────────────
-async function saveAttendanceToFirebase(record) {
-  if (!db) return;
-  try {
-    const { doc, setDoc } = window._fs;
-    // scanPhoto (base64) can be very large – strip it before saving to Firestore
-    const payload = { ...record, scanPhoto: "" };
-    await setDoc(doc(db, "attendance", record.id), payload);
-  } catch (err) {
-    console.error("saveAttendanceToFirebase error:", err);
-  }
+async function deleteStudentFromSheets(studentId) {
+  await sheetsPost("deleteStudent", { studentId });
 }
 
-async function loadAttendanceFromFirebase() {
-  if (!db) return [];
-  try {
-    const { collection, getDocs, query, orderBy } = window._fs;
-    const q        = query(collection(db, "attendance"), orderBy("timestamp", "desc"));
-    const snapshot = await getDocs(q);
-    return snapshot.docs.map(d => normalizeAttendance(d.data()));
-  } catch (err) {
-    console.error("loadAttendanceFromFirebase error:", err);
-    return [];
-  }
+async function deleteAttendanceFromSheets(recordId) {
+  await sheetsPost("deleteAttendance", { recordId });
 }
 
-async function deleteAttendanceFromFirebase(recordId) {
-  if (!db) return;
-  try {
-    const { doc, deleteDoc } = window._fs;
-    await deleteDoc(doc(db, "attendance", recordId));
-  } catch (err) {
-    console.error("deleteAttendanceFromFirebase error:", err);
-  }
-}
+async function loadFromSheets() {
+  const data = await sheetsGet();
+  if (!data) return null;
 
-// ─── Real-time listeners (onSnapshot) ───────────────────────
-function subscribeToStudents() {
-  if (!db) return;
-  const { collection, onSnapshot } = window._fs;
-  onSnapshot(collection(db, "students"), (snapshot) => {
-    state.students = snapshot.docs.map(d => normalizeStudent(d.data()));
-    updateDashboardStats();
-    renderStudentsGrid();
-  }, (err) => console.error("Students listener error:", err));
-}
+  const students = (data.students || []).map(s => {
+    // Deserialize descriptors from JSON strings stored in sheet
+    let descriptor  = null;
+    let descriptors = [];
+    try { descriptor  = JSON.parse(s.descriptor  || "[]"); } catch(e) {}
+    try { descriptors = JSON.parse(s.descriptors || "[]"); } catch(e) {}
+    return normalizeStudent({ ...s, descriptor, descriptors });
+  }).filter(Boolean);
 
-function subscribeToAttendance() {
-  if (!db) return;
-  const { collection, onSnapshot, query, orderBy } = window._fs;
-  const q = query(collection(db, "attendance"), orderBy("timestamp", "desc"));
-  onSnapshot(q, (snapshot) => {
-    state.attendances = snapshot.docs.map(d => normalizeAttendance(d.data()));
-    updateDashboardStats();
-    renderAttendanceTable();
-  }, (err) => console.error("Attendance listener error:", err));
+  const attendance = (data.attendance || []).map(a => normalizeAttendance(a)).filter(Boolean);
+  return { students, attendance };
 }
 
 // ─── Storage Keys (kept for settings only) ───────────────────
@@ -294,25 +193,17 @@ async function initApp() {
   showSection("home");
   setupOverlayCanvas();
 
-  // Show loading indicator while Firebase connects
-  showLoadingBanner("Connecting to Firebase...");
-
-  const firebaseReady = await initFirebase();
-
-  if (firebaseReady) {
-    // Load initial data from Firestore
-    showLoadingBanner("Loading students & attendance...");
-    [state.students, state.attendances] = await Promise.all([
-      loadStudentsFromFirebase(),
-      loadAttendanceFromFirebase(),
-    ]);
-
-    // Start real-time listeners so all devices stay in sync
-    subscribeToStudents();
-    subscribeToAttendance();
+  // Load data from Google Sheets
+  showLoadingBanner("Loading data...");
+  const sheetsData = await loadFromSheets();
+  if (sheetsData) {
+    state.students    = sheetsData.students;
+    state.attendances = sheetsData.attendance;
+    if (typeof window.setFirebaseStatus === "function") window.setFirebaseStatus(true);
+    console.log("✅ Loaded from Google Sheets:", state.students.length, "students");
   } else {
-    // Fallback to localStorage if Firebase is not configured
-    console.warn("Firebase unavailable - falling back to localStorage.");
+    // Fallback to localStorage if Sheets unavailable
+    console.warn("Sheets unavailable - falling back to localStorage.");
     if (typeof window.setFirebaseStatus === "function") window.setFirebaseStatus(false);
     loadData();
   }
@@ -969,7 +860,8 @@ async function registerStudent(event) {
 
   // Save to Firebase (real-time listeners will update UI automatically)
   if (db) {
-    await saveStudentToFirebase(student);
+    await saveStudentToSheets(student);
+    saveDataLocalFallback(); // also keep in localStorage as backup
   } else {
     saveDataLocalFallback();
   }
@@ -1360,8 +1252,9 @@ async function captureAttendancePhoto() {
 
   // Save attendance to Firebase (real-time listener updates UI automatically)
   if (db) {
-    await saveAttendanceToFirebase(record);
-    record.syncState = "firebase-synced";
+    await saveAttendanceToSheets(record);
+    saveDataLocalFallback();
+    record.syncState = "sheets-synced";
   } else {
     saveDataLocalFallback();
   }
@@ -1494,7 +1387,7 @@ function showSuccessModal(record) {
 
   const syncText  = record.syncState === "failed"         ? "Failed" :
                     record.syncState === "submitted"       ? "Requested" :
-                    record.syncState === "firebase-synced" ? "Firebase Synced" : "Saved locally";
+                    record.syncState === "sheets-synced" ? "Sheets Synced" : "Saved locally";
   const syncColor = record.syncState === "failed" ? "text-red-400" : "text-emerald-400";
   const matchInfo = record.matchPercent !== null && record.matchPercent !== undefined
     ? `${record.matchPercent}% confidence`
@@ -1692,8 +1585,8 @@ async function deleteStudent(studentId) {
   state.attendances = state.attendances.filter(a => a.studentId !== studentId);
 
   if (db) {
-    await deleteStudentFromFirebase(studentId);
-    await Promise.all(attToDelete.map(a => deleteAttendanceFromFirebase(a.id)));
+    await deleteStudentFromSheets(studentId);
+    await Promise.all(attToDelete.map(a => deleteAttendanceFromSheets(a.id)));
   } else {
     saveDataLocalFallback();
   }
@@ -1708,7 +1601,7 @@ async function deleteAttendanceRecord(recordId) {
   state.attendances = state.attendances.filter(r => r.id !== recordId);
 
   if (db) {
-    await deleteAttendanceFromFirebase(recordId);
+    await deleteAttendanceFromSheets(recordId);
   } else {
     saveDataLocalFallback();
     renderAttendanceTable();
@@ -1768,10 +1661,10 @@ async function saveEditStudent() {
   );
 
   if (db) {
-    await saveStudentToFirebase(state.students[idx]);
+    await saveStudentToSheets(state.students[idx]);
     // Update affected attendance records in Firestore
     const affected = state.attendances.filter(a => a.studentId === id);
-    await Promise.all(affected.map(a => saveAttendanceToFirebase(a)));
+    await Promise.all(affected.map(a => saveAttendanceToSheets(a)));
   } else {
     saveDataLocalFallback();
   }
@@ -1898,7 +1791,7 @@ function exportAttendancePDF() {
 
 // ─── Reset / Clear ────────────────────────────────────────────
 async function clearAllData() {
-  if (!confirm("Reset all demo data? This will delete ALL records from Firebase too.")) return;
+  if (!confirm("Reset all demo data? This will delete ALL records too.")) return;
 
   [STORAGE_KEYS.students, STORAGE_KEYS.attendance,
    STORAGE_KEYS.legacyStudents, STORAGE_KEYS.legacyAttendance].forEach(k =>
@@ -1907,7 +1800,7 @@ async function clearAllData() {
 
   // Delete all documents from Firestore if connected
   if (db) {
-    showLoadingBanner("Clearing Firebase data...");
+    showLoadingBanner("Clearing data...");
     try {
       const { collection, getDocs, deleteDoc, doc } = window._fs;
       const [stuSnap, attSnap] = await Promise.all([
@@ -2085,15 +1978,12 @@ async function postToBackend(action, payload) {
 function normalizeStudent(student) {
   if (!student) return null;
 
-  // Deserialize descriptors — stored as comma-joined strings in Firestore
-  // but need to be number arrays for face-api.js matching
+  // Descriptors may be stored as comma-joined strings (new format) or plain arrays (old format).
+  // Deserialize either format back into plain number arrays for face-api.js.
   const deserializeDesc = d => {
     if (!d) return null;
-    if (typeof d === "string" && d.length > 0) {
-      const arr = d.split(",").map(Number);
-      return arr.length > 0 && !isNaN(arr[0]) ? arr : null;
-    }
-    if (Array.isArray(d) && d.length > 0) return d.map(Number);
+    if (typeof d === "string") return d.split(",").map(Number);
+    if (Array.isArray(d)) return d.map(Number);
     return null;
   };
 
