@@ -70,30 +70,42 @@ async function saveStudentToFirebase(student) {
   if (!db) return;
   try {
     const { doc, setDoc } = window._fs;
-    // Firestore does NOT support nested arrays (array-of-arrays).
-    // Serialize each Float32Array descriptor as a comma-joined string so it
-    // can be stored as a flat array of strings and decoded on load.
-    const serializeDesc = d => d ? Array.from(d).join(",") : null;
+
+    // Firestore rules:
+    // 1. NO nested arrays — serialize Float32Arrays as comma-joined strings
+    // 2. NO large base64 photos — strip facePhoto and angleData photos (Firestore 1MB limit)
+    // 3. Only store what's needed for recognition and display across devices
+    const serializeDesc = d => {
+      if (!d) return null;
+      try { return Array.from(d).join(","); } catch(e) { return null; }
+    };
+
     const payload = {
-      ...student,
-      descriptors: (student.descriptors || []).map(serializeDesc),
-      descriptor:  serializeDesc(student.descriptor),
-      // Remove binary blob – facePhoto (base64) can be large; keep it but
-      // Firestore has a 1 MB per-document limit. If photos cause quota errors,
-      // store them in Firebase Storage instead and save the download URL here.
-      facePhoto: student.facePhoto || "",
-      // angleData photos can also be large – strip them, keep only counts
-      angleData: student.angleData
+      id:           String(student.id || ""),
+      name:         String(student.name || ""),
+      roll:         String(student.roll || ""),
+      class:        String(student.class || ""),
+      studentPhone: String(student.studentPhone || ""),
+      parentPhone:  String(student.parentPhone || ""),
+      embeddingCount: Number(student.embeddingCount || 0),
+      registeredOn: String(student.registeredOn || new Date().toISOString()),
+      updatedOn:    String(student.updatedOn || new Date().toISOString()),
+      facePhoto:    "",  // intentionally empty — too large for Firestore
+      descriptors:  (student.descriptors || []).map(serializeDesc).filter(Boolean),
+      descriptor:   serializeDesc(student.descriptor),
+      angleData:    student.angleData
         ? Object.fromEntries(
             Object.entries(student.angleData).map(([k, v]) => [
-              k, v ? { count: v.count || 0 } : null,
+              k, v ? { count: Number(v.count || 0) } : null,
             ])
           )
         : null,
     };
+
     await setDoc(doc(db, "students", student.id), payload);
+    console.log("✅ Student saved to Firestore:", student.id, "descriptors:", payload.descriptors.length);
   } catch (err) {
-    console.error("saveStudentToFirebase error:", err);
+    console.error("❌ saveStudentToFirebase error:", err.code, err.message);
   }
 }
 
@@ -2073,12 +2085,15 @@ async function postToBackend(action, payload) {
 function normalizeStudent(student) {
   if (!student) return null;
 
-  // Descriptors may be stored as comma-joined strings (new format) or plain arrays (old format).
-  // Deserialize either format back into plain number arrays for face-api.js.
+  // Deserialize descriptors — stored as comma-joined strings in Firestore
+  // but need to be number arrays for face-api.js matching
   const deserializeDesc = d => {
     if (!d) return null;
-    if (typeof d === "string") return d.split(",").map(Number);
-    if (Array.isArray(d)) return d.map(Number);
+    if (typeof d === "string" && d.length > 0) {
+      const arr = d.split(",").map(Number);
+      return arr.length > 0 && !isNaN(arr[0]) ? arr : null;
+    }
+    if (Array.isArray(d) && d.length > 0) return d.map(Number);
     return null;
   };
 
