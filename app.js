@@ -5,13 +5,159 @@
 //    CSV & PDF export
 // ============================================================
 
-// ─── Storage Keys ───────────────────────────────────────────
+// ─── Firebase Setup ──────────────────────────────────────────
+// 🔧 REPLACE these values with your own Firebase project config
+// Get them from: https://console.firebase.google.com → Project Settings → Your Apps
+const FIREBASE_CONFIG = {
+  apiKey:            "YOUR_API_KEY",
+  authDomain:        "YOUR_PROJECT_ID.firebaseapp.com",
+  projectId:         "YOUR_PROJECT_ID",
+  storageBucket:     "YOUR_PROJECT_ID.appspot.com",
+  messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
+  appId:             "YOUR_APP_ID",
+};
+
+// Firebase SDK modules (loaded via CDN in index.html)
+let db = null;   // Firestore instance – set in initFirebase()
+
+async function initFirebase() {
+  try {
+    const { initializeApp }   = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js");
+    const { getFirestore, collection, doc, setDoc, getDocs, deleteDoc, addDoc, query, orderBy, onSnapshot }
+      = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js");
+
+    const app = initializeApp(FIREBASE_CONFIG);
+    db = getFirestore(app);
+
+    // Expose Firestore helpers onto a single namespace so the rest of the
+    // file can reach them without extra imports later.
+    window._fs = { collection, doc, setDoc, getDocs, deleteDoc, addDoc, query, orderBy, onSnapshot };
+
+    console.log("✅ Firebase connected.");
+    return true;
+  } catch (err) {
+    console.error("❌ Firebase init failed:", err);
+    return false;
+  }
+}
+
+// ─── Firebase: Students ──────────────────────────────────────
+async function saveStudentToFirebase(student) {
+  if (!db) return;
+  try {
+    const { doc, setDoc } = window._fs;
+    // Descriptors must be stored as plain arrays (Firestore-safe)
+    const payload = {
+      ...student,
+      descriptors: (student.descriptors || []).map(d => Array.from(d)),
+      descriptor:  student.descriptor ? Array.from(student.descriptor) : null,
+      // Remove binary blob – facePhoto (base64) can be large; keep it but
+      // Firestore has a 1 MB per-document limit. If photos cause quota errors,
+      // store them in Firebase Storage instead and save the download URL here.
+      facePhoto: student.facePhoto || "",
+      // angleData photos can also be large – strip them, keep only counts
+      angleData: student.angleData
+        ? Object.fromEntries(
+            Object.entries(student.angleData).map(([k, v]) => [
+              k, v ? { count: v.count || 0 } : null,
+            ])
+          )
+        : null,
+    };
+    await setDoc(doc(db, "students", student.id), payload);
+  } catch (err) {
+    console.error("saveStudentToFirebase error:", err);
+  }
+}
+
+async function loadStudentsFromFirebase() {
+  if (!db) return [];
+  try {
+    const { collection, getDocs } = window._fs;
+    const snapshot = await getDocs(collection(db, "students"));
+    return snapshot.docs.map(d => normalizeStudent(d.data()));
+  } catch (err) {
+    console.error("loadStudentsFromFirebase error:", err);
+    return [];
+  }
+}
+
+async function deleteStudentFromFirebase(studentId) {
+  if (!db) return;
+  try {
+    const { doc, deleteDoc } = window._fs;
+    await deleteDoc(doc(db, "students", studentId));
+  } catch (err) {
+    console.error("deleteStudentFromFirebase error:", err);
+  }
+}
+
+// ─── Firebase: Attendance ────────────────────────────────────
+async function saveAttendanceToFirebase(record) {
+  if (!db) return;
+  try {
+    const { doc, setDoc } = window._fs;
+    // scanPhoto (base64) can be very large – strip it before saving to Firestore
+    const payload = { ...record, scanPhoto: "" };
+    await setDoc(doc(db, "attendance", record.id), payload);
+  } catch (err) {
+    console.error("saveAttendanceToFirebase error:", err);
+  }
+}
+
+async function loadAttendanceFromFirebase() {
+  if (!db) return [];
+  try {
+    const { collection, getDocs, query, orderBy } = window._fs;
+    const q        = query(collection(db, "attendance"), orderBy("timestamp", "desc"));
+    const snapshot = await getDocs(q);
+    return snapshot.docs.map(d => normalizeAttendance(d.data()));
+  } catch (err) {
+    console.error("loadAttendanceFromFirebase error:", err);
+    return [];
+  }
+}
+
+async function deleteAttendanceFromFirebase(recordId) {
+  if (!db) return;
+  try {
+    const { doc, deleteDoc } = window._fs;
+    await deleteDoc(doc(db, "attendance", recordId));
+  } catch (err) {
+    console.error("deleteAttendanceFromFirebase error:", err);
+  }
+}
+
+// ─── Real-time listeners (onSnapshot) ───────────────────────
+function subscribeToStudents() {
+  if (!db) return;
+  const { collection, onSnapshot } = window._fs;
+  onSnapshot(collection(db, "students"), (snapshot) => {
+    state.students = snapshot.docs.map(d => normalizeStudent(d.data()));
+    updateDashboardStats();
+    renderStudentsGrid();
+  }, (err) => console.error("Students listener error:", err));
+}
+
+function subscribeToAttendance() {
+  if (!db) return;
+  const { collection, onSnapshot, query, orderBy } = window._fs;
+  const q = query(collection(db, "attendance"), orderBy("timestamp", "desc"));
+  onSnapshot(q, (snapshot) => {
+    state.attendances = snapshot.docs.map(d => normalizeAttendance(d.data()));
+    updateDashboardStats();
+    renderAttendanceTable();
+  }, (err) => console.error("Attendance listener error:", err));
+}
+
+// ─── Storage Keys (kept for settings only) ───────────────────
 const STORAGE_KEYS = {
-  settings: "face-attendance-settings",
-  students: "face-attendance-students",
-  attendance: "face-attendance-log",
-  legacyStudents: "facscan_students",
-  legacyAttendance: "facscan_attendances",
+  settings:        "face-attendance-settings",
+  // Legacy keys – read once on first load to migrate old data, then ignored
+  students:        "face-attendance-students",
+  attendance:      "face-attendance-log",
+  legacyStudents:  "facscan_students",
+  legacyAttendance:"facscan_attendances",
 };
 
 // ─── Defaults ────────────────────────────────────────────────
@@ -95,17 +241,61 @@ const dom = {};
 window.onload = initApp;
 
 // ─── Init ─────────────────────────────────────────────────────
-function initApp() {
+async function initApp() {
   assignDom();
-  loadData();
+  loadSettings();           // load only settings from localStorage
   renderStaticLabels();
   updateClock();
   window.setInterval(updateClock, 1000);
-  updateDashboardStats();
   showSection("home");
+  setupOverlayCanvas();
+
+  // Show loading indicator while Firebase connects
+  showLoadingBanner("Connecting to Firebase...");
+
+  const firebaseReady = await initFirebase();
+
+  if (firebaseReady) {
+    // Load initial data from Firestore
+    showLoadingBanner("Loading students & attendance...");
+    [state.students, state.attendances] = await Promise.all([
+      loadStudentsFromFirebase(),
+      loadAttendanceFromFirebase(),
+    ]);
+
+    // Start real-time listeners so all devices stay in sync
+    subscribeToStudents();
+    subscribeToAttendance();
+  } else {
+    // Fallback to localStorage if Firebase is not configured
+    console.warn("Firebase unavailable - falling back to localStorage.");
+    loadData();
+  }
+
+  hideLoadingBanner();
+  updateDashboardStats();
   renderStudentsGrid();
   renderAttendanceTable();
-  setupOverlayCanvas();
+}
+
+// ─── Loading Banner Helpers ───────────────────────────────────
+function showLoadingBanner(msg) {
+  let banner = document.getElementById("fb-loading-banner");
+  if (!banner) {
+    banner = document.createElement("div");
+    banner.id = "fb-loading-banner";
+    banner.style.cssText =
+      "position:fixed;top:0;left:0;width:100%;z-index:9999;background:#0ea5e9;" +
+      "color:#fff;text-align:center;padding:10px 16px;font-size:0.9rem;font-weight:600;";
+    document.body.prepend(banner);
+  }
+  banner.textContent = "⏳ " + msg;
+  banner.style.display = "block";
+}
+
+function hideLoadingBanner() {
+  const banner = document.getElementById("fb-loading-banner");
+  if (banner) banner.style.display = "none";
 }
 
 function assignDom() {
@@ -176,23 +366,39 @@ function setupOverlayCanvas() {
 }
 
 // ─── Data ─────────────────────────────────────────────────────
-function loadData() {
+// loadSettings: only restores app settings from localStorage
+function loadSettings() {
   const config = typeof window.FACESCAN_CONFIG === "object" ? window.FACESCAN_CONFIG : {};
   const saved  = loadJson(STORAGE_KEYS.settings, {});
   state.settings = { ...DEFAULT_SETTINGS, ...config, ...saved };
+}
+
+// loadData: full localStorage fallback used when Firebase is unavailable
+function loadData() {
+  loadSettings();
 
   const savedStudents =
     loadJson(STORAGE_KEYS.students, null) ?? loadJson(STORAGE_KEYS.legacyStudents, []);
   const savedAttendances =
     loadJson(STORAGE_KEYS.attendance, null) ?? loadJson(STORAGE_KEYS.legacyAttendance, []);
 
-  state.students   = Array.isArray(savedStudents)
+  state.students    = Array.isArray(savedStudents)
     ? savedStudents.map(normalizeStudent).filter(Boolean) : [];
   state.attendances = Array.isArray(savedAttendances)
     ? savedAttendances.map(normalizeAttendance).filter(Boolean) : [];
 }
 
+// saveData: persists settings to localStorage; triggers UI refresh.
+// Students and attendance are saved individually via Firebase helpers.
 function saveData() {
+  localStorage.setItem(STORAGE_KEYS.settings, JSON.stringify(state.settings));
+  updateDashboardStats();
+  renderStudentsGrid();
+  renderAttendanceTable();
+}
+
+// saveDataLocalFallback: used only when Firebase is unavailable
+function saveDataLocalFallback() {
   localStorage.setItem(STORAGE_KEYS.students,   JSON.stringify(state.students));
   localStorage.setItem(STORAGE_KEYS.attendance, JSON.stringify(state.attendances));
   localStorage.setItem(STORAGE_KEYS.settings,   JSON.stringify(state.settings));
@@ -697,7 +903,12 @@ async function registerStudent(event) {
   if (idx === -1) state.students.unshift(student);
   else state.students[idx] = student;
 
-  saveData();
+  // Save to Firebase (real-time listeners will update UI automatically)
+  if (db) {
+    await saveStudentToFirebase(student);
+  } else {
+    saveDataLocalFallback();
+  }
   dom.registerForm.reset();
   resetAllAngles();
   stopCamera();
@@ -1081,7 +1292,14 @@ async function captureAttendancePhoto() {
   };
 
   state.attendances.unshift(record);
-  saveData();
+
+  // Save attendance to Firebase (real-time listener updates UI automatically)
+  if (db) {
+    await saveAttendanceToFirebase(record);
+    record.syncState = "firebase-synced";
+  } else {
+    saveDataLocalFallback();
+  }
 
   const syncResult = await postToBackend("logAttendance", {
     attendance: {
@@ -1101,10 +1319,12 @@ async function captureAttendancePhoto() {
     },
   });
 
-  record.syncState = syncResult.ok
-    ? (state.settings.appsScriptUrl ? "submitted" : "local-only")
-    : "failed";
-  saveData();
+  if (!db) {
+    record.syncState = syncResult.ok
+      ? (state.settings.appsScriptUrl ? "submitted" : "local-only")
+      : "failed";
+    saveDataLocalFallback();
+  }
   showSuccessModal(record);
 
   dom.attendanceStatus.textContent = `Attendance saved for ${student.name}. Ready for next scan.`;
@@ -1394,25 +1614,38 @@ function mockSendWhatsAppFromLog(recordId) {
 }
 
 // ─── DELETE STUDENT ──────────────────────────────────────────
-function deleteStudent(studentId) {
+async function deleteStudent(studentId) {
   const student = state.students.find(s => s.id === studentId);
   if (!student) return;
   if (!confirm(`Delete student "${student.name}" (Roll: ${student.roll})?\n\nThis will also remove their attendance records.`)) return;
 
   state.students    = state.students.filter(s => s.id !== studentId);
   state.attendances = state.attendances.filter(a => a.studentId !== studentId);
-  saveData();
+
+  if (db) {
+    await deleteStudentFromFirebase(studentId);
+    // Also delete this student's attendance records from Firestore
+    const attToDelete = state.attendances.filter(a => a.studentId === studentId);
+    await Promise.all(attToDelete.map(a => deleteAttendanceFromFirebase(a.id)));
+  } else {
+    saveDataLocalFallback();
+  }
 }
 
 // ─── DELETE ATTENDANCE RECORD ─────────────────────────────────
-function deleteAttendanceRecord(recordId) {
+async function deleteAttendanceRecord(recordId) {
   const record = state.attendances.find(r => r.id === recordId);
   if (!record) return;
   if (!confirm(`Delete attendance record for ${record.name} on ${record.formattedTime}?`)) return;
 
   state.attendances = state.attendances.filter(r => r.id !== recordId);
-  saveData();
-  renderAttendanceTable();
+
+  if (db) {
+    await deleteAttendanceFromFirebase(recordId);
+  } else {
+    saveDataLocalFallback();
+    renderAttendanceTable();
+  }
 }
 
 // ─── EDIT STUDENT MODAL ───────────────────────────────────────
@@ -1434,7 +1667,7 @@ function closeEditModal() {
   document.getElementById("edit-student-modal").classList.add("hidden");
 }
 
-function saveEditStudent() {
+async function saveEditStudent() {
   const id          = document.getElementById("edit-student-id").value;
   const name        = document.getElementById("edit-name").value.trim();
   const roll        = document.getElementById("edit-roll").value.trim();
@@ -1467,7 +1700,14 @@ function saveEditStudent() {
       : a
   );
 
-  saveData();
+  if (db) {
+    await saveStudentToFirebase(state.students[idx]);
+    // Update affected attendance records in Firestore
+    const affected = state.attendances.filter(a => a.studentId === id);
+    await Promise.all(affected.map(a => saveAttendanceToFirebase(a)));
+  } else {
+    saveDataLocalFallback();
+  }
   closeEditModal();
 }
 
@@ -1590,12 +1830,33 @@ function exportAttendancePDF() {
 }
 
 // ─── Reset / Clear ────────────────────────────────────────────
-function clearAllData() {
-  if (!confirm("Reset all demo data?")) return;
+async function clearAllData() {
+  if (!confirm("Reset all demo data? This will delete ALL records from Firebase too.")) return;
+
   [STORAGE_KEYS.students, STORAGE_KEYS.attendance,
    STORAGE_KEYS.legacyStudents, STORAGE_KEYS.legacyAttendance].forEach(k =>
     localStorage.removeItem(k)
   );
+
+  // Delete all documents from Firestore if connected
+  if (db) {
+    showLoadingBanner("Clearing Firebase data...");
+    try {
+      const { collection, getDocs, deleteDoc, doc } = window._fs;
+      const [stuSnap, attSnap] = await Promise.all([
+        getDocs(collection(db, "students")),
+        getDocs(collection(db, "attendance")),
+      ]);
+      await Promise.all([
+        ...stuSnap.docs.map(d => deleteDoc(doc(db, "students",   d.id))),
+        ...attSnap.docs.map(d => deleteDoc(doc(db, "attendance", d.id))),
+      ]);
+    } catch (err) {
+      console.error("clearAllData Firebase error:", err);
+    }
+    hideLoadingBanner();
+  }
+
   state.students             = [];
   state.attendances          = [];
   state.registerPhoto        = null;
