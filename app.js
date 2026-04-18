@@ -22,9 +22,9 @@ const firebaseConfig = {
 // Returns true if the config still has default placeholder values.
 function isFirebaseConfigPlaceholder() {
   return (
-    !FIREBASE_CONFIG.apiKey ||
-    FIREBASE_CONFIG.apiKey === "YOUR_API_KEY" ||
-    FIREBASE_CONFIG.projectId === "YOUR_PROJECT_ID"
+    !firebaseConfig.apiKey ||
+    firebaseConfig.apiKey === "YOUR_API_KEY" ||
+    firebaseConfig.projectId === "YOUR_PROJECT_ID"
   );
 }
 
@@ -48,7 +48,7 @@ async function initFirebase() {
     const { getFirestore, collection, doc, setDoc, getDocs, deleteDoc, addDoc, query, orderBy, onSnapshot }
       = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js");
 
-    const app = initializeApp(FIREBASE_CONFIG);
+    const app = initializeApp(firebaseConfig);
     db = getFirestore(app);
 
     // Expose Firestore helpers onto a single namespace so the rest of the
