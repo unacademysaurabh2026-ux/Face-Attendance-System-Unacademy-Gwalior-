@@ -6,77 +6,85 @@
 // ============================================================
 
 // ─── Google Sheets Backend ───────────────────────────────────
-// Simple GET-based API — no CORS issues, works everywhere
+let db = null; // kept as null — using Google Sheets instead of Firebase
 const SHEETS_URL = "https://script.google.com/macros/s/AKfycbyDqArdI88Q2LrLaXx38EbtfKXSYLIWRlnhyU3r1ad6-Enytzsy6y9kE5njaO0sLF5pbg/exec";
 
-async function sheetsCall(params) {
+// POST to Google Sheets Apps Script
+async function sheetsPost(action, payload) {
   try {
-    const url = SHEETS_URL + "?" + new URLSearchParams(params).toString();
-    const res  = await fetch(url);
-    const text = await res.text();
-    const data = JSON.parse(text);
-    return data;
-  } catch(err) {
-    console.error("Sheets error:", err);
+    await fetch(SHEETS_URL, {
+      method: "POST",
+      mode: "no-cors",
+      headers: { "Content-Type": "text/plain" },
+      body: JSON.stringify({ action, ...payload }),
+    });
+  } catch (err) {
+    console.error("Sheets POST error:", err);
+  }
+}
+
+// GET all data from Google Sheets
+async function sheetsGet() {
+  try {
+    const res  = await fetch(SHEETS_URL);
+    const data = await res.json();
+    if (data.ok) return data;
+    console.error("Sheets GET error:", data.error);
+    return null;
+  } catch (err) {
+    console.error("Sheets GET error:", err);
     return null;
   }
 }
 
 async function saveStudentToSheets(student) {
-  // Only save non-descriptor info — descriptors are too large for URLs
-  // Face recognition data stays in localStorage on the registration device
-  const slim = {
-    id:            String(student.id || ""),
-    name:          String(student.name || ""),
-    roll:          String(student.roll || ""),
-    class:         String(student.class || ""),
-    studentPhone:  String(student.studentPhone || ""),
-    parentPhone:   String(student.parentPhone  || ""),
-    embeddingCount:Number(student.embeddingCount || 0),
-    registeredOn:  String(student.registeredOn  || new Date().toISOString()),
+  const serializeDesc = d => {
+    if (!d) return [];
+    try { return Array.from(d); } catch(e) { return []; }
   };
-  const result = await sheetsCall({ action: "saveStudent", data: JSON.stringify(slim) });
-  if (result && result.ok) console.log("✅ Student saved to Sheets:", student.name);
-  else console.error("❌ Sheets save failed:", result);
+  await sheetsPost("saveStudent", {
+    student: {
+      id:            student.id,
+      name:          student.name,
+      roll:          student.roll,
+      class:         student.class,
+      studentPhone:  student.studentPhone || "",
+      parentPhone:   student.parentPhone  || "",
+      embeddingCount:student.embeddingCount || 0,
+      descriptor:    serializeDesc(student.descriptor),
+      descriptors:   (student.descriptors || []).map(serializeDesc),
+      registeredOn:  student.registeredOn || new Date().toISOString(),
+    }
+  });
+  console.log("✅ Student saved to Sheets:", student.name);
 }
 
 async function saveAttendanceToSheets(record) {
-  const slim = {
-    id:          String(record.id || ""),
-    studentId:   String(record.studentId || ""),
-    name:        String(record.name || ""),
-    roll:        String(record.roll || ""),
-    class:       String(record.class || ""),
-    studentPhone:String(record.studentPhone || ""),
-    parentPhone: String(record.parentPhone  || ""),
-    date:        String(record.date || ""),
-    timeLabel:   String(record.timeLabel || ""),
-    timestamp:   String(record.timestamp || new Date().toISOString()),
-    matchPercent:String(record.matchPercent || ""),
-  };
-  const result = await sheetsCall({ action: "saveAttendance", data: JSON.stringify(slim) });
-  if (result && result.ok) console.log("✅ Attendance saved to Sheets:", record.name);
+  await sheetsPost("saveAttendance", { record });
+  console.log("✅ Attendance saved to Sheets:", record.name);
 }
 
 async function deleteStudentFromSheets(studentId) {
-  await sheetsCall({ action: "deleteStudent", id: String(studentId) });
+  await sheetsPost("deleteStudent", { studentId });
 }
 
 async function deleteAttendanceFromSheets(recordId) {
-  await sheetsCall({ action: "deleteAttendance", id: String(recordId) });
+  await sheetsPost("deleteAttendance", { recordId });
 }
 
 async function loadFromSheets() {
-  const data = await sheetsCall({});
-  if (!data || !data.ok) return null;
-  // Merge sheet students with localStorage descriptors for face recognition
-  const localStudents = (() => {
-    try { return JSON.parse(localStorage.getItem("face-attendance-students") || "[]"); } catch(e) { return []; }
-  })();
+  const data = await sheetsGet();
+  if (!data) return null;
+
   const students = (data.students || []).map(s => {
-    const local = localStudents.find(l => l && l.id === s.id);
-    return normalizeStudent({ ...s, descriptor: local?.descriptor || null, descriptors: local?.descriptors || [] });
+    // Deserialize descriptors from JSON strings stored in sheet
+    let descriptor  = null;
+    let descriptors = [];
+    try { descriptor  = JSON.parse(s.descriptor  || "[]"); } catch(e) {}
+    try { descriptors = JSON.parse(s.descriptors || "[]"); } catch(e) {}
+    return normalizeStudent({ ...s, descriptor, descriptors });
   }).filter(Boolean);
+
   const attendance = (data.attendance || []).map(a => normalizeAttendance(a)).filter(Boolean);
   return { students, attendance };
 }
@@ -852,12 +860,8 @@ async function registerStudent(event) {
   else state.students[idx] = student;
 
   // Save to Firebase (real-time listeners will update UI automatically)
-  if (db) {
-    await saveStudentToSheets(student);
-    saveDataLocalFallback(); // also keep in localStorage as backup
-  } else {
-    saveDataLocalFallback();
-  }
+  await saveStudentToSheets(student);
+  saveDataLocalFallback();
   dom.registerForm.reset();
   resetAllAngles();
   stopCamera();
@@ -1244,7 +1248,7 @@ async function captureAttendancePhoto() {
   state.attendances.unshift(record);
 
   // Save attendance to Firebase (real-time listener updates UI automatically)
-  if (db) {
+  if (false) { // no Firebase
     await saveAttendanceToSheets(record);
     saveDataLocalFallback();
     record.syncState = "sheets-synced";
@@ -1270,7 +1274,7 @@ async function captureAttendancePhoto() {
     },
   });
 
-  if (!db) {
+  if (false) { // Google Sheets handles sync
     record.syncState = syncResult.ok
       ? (state.settings.appsScriptUrl ? "submitted" : "local-only")
       : "failed";
@@ -1577,7 +1581,7 @@ async function deleteStudent(studentId) {
   state.students    = state.students.filter(s => s.id !== studentId);
   state.attendances = state.attendances.filter(a => a.studentId !== studentId);
 
-  if (db) {
+  {
     await deleteStudentFromSheets(studentId);
     await Promise.all(attToDelete.map(a => deleteAttendanceFromSheets(a.id)));
   } else {
@@ -1593,7 +1597,7 @@ async function deleteAttendanceRecord(recordId) {
 
   state.attendances = state.attendances.filter(r => r.id !== recordId);
 
-  if (db) {
+  if (false) { // no Firebase
     await deleteAttendanceFromSheets(recordId);
   } else {
     saveDataLocalFallback();
@@ -1653,7 +1657,7 @@ async function saveEditStudent() {
       : a
   );
 
-  if (db) {
+  if (false) { // no Firebase
     await saveStudentToSheets(state.students[idx]);
     // Update affected attendance records in Firestore
     const affected = state.attendances.filter(a => a.studentId === id);
@@ -1791,24 +1795,7 @@ async function clearAllData() {
     localStorage.removeItem(k)
   );
 
-  // Delete all documents from Firestore if connected
-  if (db) {
-    showLoadingBanner("Clearing data...");
-    try {
-      const { collection, getDocs, deleteDoc, doc } = window._fs;
-      const [stuSnap, attSnap] = await Promise.all([
-        getDocs(collection(db, "students")),
-        getDocs(collection(db, "attendance")),
-      ]);
-      await Promise.all([
-        ...stuSnap.docs.map(d => deleteDoc(doc(db, "students",   d.id))),
-        ...attSnap.docs.map(d => deleteDoc(doc(db, "attendance", d.id))),
-      ]);
-    } catch (err) {
-      console.error("clearAllData Firebase error:", err);
-    }
-    hideLoadingBanner();
-  }
+  // Google Sheets data is not auto-cleared — user can clear the sheet manually
 
   state.students             = [];
   state.attendances          = [];
