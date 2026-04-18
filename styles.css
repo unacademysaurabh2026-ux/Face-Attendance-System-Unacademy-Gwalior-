@@ -1,8 +1,6 @@
 @import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap");
 
-:root {
-  --tw-color-primary: #0ea5e9;
-}
+/* Note: Tailwind's CDN is loaded in index.html — these are only supplementary styles. */
 
 * {
   font-family: "Inter", system-ui, sans-serif;

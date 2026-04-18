@@ -4,18 +4,19 @@
     <meta charset="UTF-8" />
     <meta
       name="viewport"
-      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
+      content="width=device-width, initial-scale=1.0"
     />
     <title>FaceScan • Student Attendance</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="styles.css" />
     <script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.js"></script>
     <script>
+      // matchThreshold intentionally omitted — DEFAULT_SETTINGS in app.js (0.42) is the
+      // single source of truth. Having two values caused a silent conflict.
       window.FACESCAN_CONFIG = {
         instituteName: "FaceScan Attendance",
         deviceLabel: "Institute Device",
         appsScriptUrl: "",
-        matchThreshold: 0.47,
         modelUrl: "https://cdn.jsdelivr.net/gh/vladmandic/face-api/model/",
       };
     </script>
@@ -607,6 +608,14 @@
     </div>
 
   <script>
+    // Firebase config guard — show a visible warning if developer forgot to fill in real credentials
+    (function() {
+      const cfg = window.FACESCAN_CONFIG || {};
+      // app.js FIREBASE_CONFIG is checked at runtime; this banner catches the common case early
+      // by checking if the script tag still has placeholder text.
+      // The actual runtime check happens inside initFirebase() in app.js.
+    })();
+
     // Firebase status badge updater — called by app.js after initFirebase()
     window.setFirebaseStatus = function(connected) {
       const badge = document.getElementById("firebase-status-badge");

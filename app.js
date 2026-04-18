@@ -17,10 +17,31 @@ const FIREBASE_CONFIG = {
   appId:             "YOUR_APP_ID",
 };
 
+// Guard: detect unconfigured placeholder credentials before attempting to connect.
+// Returns true if the config still has default placeholder values.
+function isFirebaseConfigPlaceholder() {
+  return (
+    !FIREBASE_CONFIG.apiKey ||
+    FIREBASE_CONFIG.apiKey === "YOUR_API_KEY" ||
+    FIREBASE_CONFIG.projectId === "YOUR_PROJECT_ID"
+  );
+}
+
 // Firebase SDK modules (loaded via CDN in index.html)
 let db = null;   // Firestore instance – set in initFirebase()
 
 async function initFirebase() {
+  // Fail fast with a clear message if developer hasn't replaced placeholder credentials.
+  if (isFirebaseConfigPlaceholder()) {
+    console.warn(
+      "⚠️ Firebase config has placeholder values. " +
+      "Open app.js and replace FIREBASE_CONFIG with your real project credentials. " +
+      "Falling back to localStorage."
+    );
+    if (typeof window.setFirebaseStatus === "function") window.setFirebaseStatus(false);
+    return false;
+  }
+
   try {
     const { initializeApp }   = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js");
     const { getFirestore, collection, doc, setDoc, getDocs, deleteDoc, addDoc, query, orderBy, onSnapshot }
@@ -34,9 +55,11 @@ async function initFirebase() {
     window._fs = { collection, doc, setDoc, getDocs, deleteDoc, addDoc, query, orderBy, onSnapshot };
 
     console.log("✅ Firebase connected.");
+    if (typeof window.setFirebaseStatus === "function") window.setFirebaseStatus(true);
     return true;
   } catch (err) {
     console.error("❌ Firebase init failed:", err);
+    if (typeof window.setFirebaseStatus === "function") window.setFirebaseStatus(false);
     return false;
   }
 }
@@ -238,7 +261,12 @@ const state = {
 
 const dom = {};
 
-window.onload = initApp;
+// type="module" scripts run after DOM is parsed; use DOMContentLoaded for reliability
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", initApp);
+} else {
+  initApp();
+}
 
 // ─── Init ─────────────────────────────────────────────────────
 async function initApp() {
@@ -269,6 +297,7 @@ async function initApp() {
   } else {
     // Fallback to localStorage if Firebase is not configured
     console.warn("Firebase unavailable - falling back to localStorage.");
+    if (typeof window.setFirebaseStatus === "function") window.setFirebaseStatus(false);
     loadData();
   }
 
@@ -399,6 +428,8 @@ function saveData() {
 
 // saveDataLocalFallback: used only when Firebase is unavailable
 function saveDataLocalFallback() {
+  // NOTE: We do NOT call loadSettings() here. Settings are already in state.settings;
+  // re-loading from localStorage would unnecessarily overwrite any in-memory changes.
   localStorage.setItem(STORAGE_KEYS.students,   JSON.stringify(state.students));
   localStorage.setItem(STORAGE_KEYS.attendance, JSON.stringify(state.attendances));
   localStorage.setItem(STORAGE_KEYS.settings,   JSON.stringify(state.settings));
@@ -464,8 +495,24 @@ async function startCamera(videoElement, mode) {
     videoElement.srcObject  = stream;
     await videoElement.play();
     return true;
-  } catch {
-    alert("Camera permission is required to continue.");
+  } catch (err) {
+    // Provide specific, actionable messages for each camera error type
+    let message = "Camera access failed. ";
+    if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
+      message += "Permission was denied. Please allow camera access in your browser settings and reload.";
+    } else if (err.name === "NotFoundError" || err.name === "DevicesNotFoundError") {
+      message += "No camera found on this device.";
+    } else if (err.name === "NotReadableError" || err.name === "TrackStartError") {
+      message += "Camera is already in use by another application. Close it and try again.";
+    } else if (err.name === "OverconstrainedError") {
+      message += "Camera does not support the required resolution. Try a different device.";
+    } else if (err.name === "SecurityError") {
+      message += "Camera access requires HTTPS or localhost.";
+    } else {
+      message += err.message || "Unknown error.";
+    }
+    console.error("Camera error:", err.name, err.message);
+    alert(message);
     return false;
   }
 }
@@ -790,8 +837,9 @@ async function extractBestFrame(videoElement, canvasElement) {
   const ctx = canvasElement.getContext("2d");
   ctx.drawImage(videoElement, 0, 0, vw, vh);
 
-  const detection = await faceapi
-    .detectSingleFace(videoElement, new faceapi.TinyFaceDetectorOptions({
+  const _faceapi = typeof faceapi !== "undefined" ? faceapi : window.faceapi;
+  const detection = await _faceapi
+    .detectSingleFace(videoElement, new _faceapi.TinyFaceDetectorOptions({
       inputSize: 320,
       scoreThreshold: REG_DETECTION_SCORE_MIN,
     }))
@@ -999,10 +1047,11 @@ async function runLiveRecognition() {
   state.liveRecognitionBusy = true;
 
   try {
-    const detections = await faceapi
+    const _faceapi = typeof faceapi !== "undefined" ? faceapi : window.faceapi;
+    const detections = await _faceapi
       .detectAllFaces(
         dom.attendanceVideo,
-        new faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.5 }),
+        new _faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.5 }),
       )
       .withFaceLandmarks()
       .withFaceDescriptors();
@@ -1427,8 +1476,9 @@ function showSuccessModal(record) {
     `✅ Attendance Marked!<br><span class="text-emerald-400">${escapeHtml(record.name)}</span>`;
   dom.modalSubtitle.textContent = `Roll ${record.roll} · ${record.class}`;
 
-  const syncText  = record.syncState === "failed" ? "Failed" :
-                    record.syncState === "submitted" ? "Requested" : "Saved locally";
+  const syncText  = record.syncState === "failed"         ? "Failed" :
+                    record.syncState === "submitted"       ? "Requested" :
+                    record.syncState === "firebase-synced" ? "Firebase Synced" : "Saved locally";
   const syncColor = record.syncState === "failed" ? "text-red-400" : "text-emerald-400";
   const matchInfo = record.matchPercent !== null && record.matchPercent !== undefined
     ? `${record.matchPercent}% confidence`
@@ -1619,13 +1669,14 @@ async function deleteStudent(studentId) {
   if (!student) return;
   if (!confirm(`Delete student "${student.name}" (Roll: ${student.roll})?\n\nThis will also remove their attendance records.`)) return;
 
+  // Capture attendance records to delete BEFORE filtering them out of state
+  const attToDelete = state.attendances.filter(a => a.studentId === studentId);
+
   state.students    = state.students.filter(s => s.id !== studentId);
   state.attendances = state.attendances.filter(a => a.studentId !== studentId);
 
   if (db) {
     await deleteStudentFromFirebase(studentId);
-    // Also delete this student's attendance records from Firestore
-    const attToDelete = state.attendances.filter(a => a.studentId === studentId);
     await Promise.all(attToDelete.map(a => deleteAttendanceFromFirebase(a.id)));
   } else {
     saveDataLocalFallback();
@@ -1913,15 +1964,17 @@ async function ensureModels() {
   if (state.modelsLoaded) return;
   if (_modelLoadPromise.current) return _modelLoadPromise.current;
 
-  if (typeof faceapi === "undefined") {
+  // In module scope, faceapi loaded via plain <script> tag lives on window
+  const _faceapi = typeof faceapi !== "undefined" ? faceapi : window.faceapi;
+  if (!_faceapi) {
     throw new Error("Face recognition library did not load. Check your internet connection.");
   }
 
   _modelLoadPromise.current = (async () => {
     const url = normalizeModelUrl(state.settings.modelUrl);
-    await faceapi.nets.tinyFaceDetector.loadFromUri(url);
-    await faceapi.nets.faceLandmark68Net.loadFromUri(url);
-    await faceapi.nets.faceRecognitionNet.loadFromUri(url);
+    await _faceapi.nets.tinyFaceDetector.loadFromUri(url);
+    await _faceapi.nets.faceLandmark68Net.loadFromUri(url);
+    await _faceapi.nets.faceRecognitionNet.loadFromUri(url);
     state.modelsLoaded = true;
   })();
 
@@ -1930,9 +1983,10 @@ async function ensureModels() {
 
 // ─── Face detection helpers ───────────────────────────────────
 async function detectFace(videoElement) {
-  return faceapi
+  const _faceapi = typeof faceapi !== "undefined" ? faceapi : window.faceapi;
+  return _faceapi
     .detectSingleFace(videoElement,
-      new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.5 })
+      new _faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.5 })
     )
     .withFaceLandmarks()
     .withFaceDescriptor();
@@ -1987,6 +2041,10 @@ function isSelectableMatch(match, threshold) {
 async function postToBackend(action, payload) {
   if (!state.settings.appsScriptUrl) return { ok: true, mode: "local-only" };
   try {
+    // NOTE: mode:"no-cors" is required for Google Apps Script but produces an opaque response.
+    // This means we cannot read the response body or status code — the fetch will appear to
+    // "succeed" even if the server returns an error. We therefore always return mode:"submitted"
+    // (not "synced") to indicate the request was sent, not that it was confirmed received.
     await fetch(state.settings.appsScriptUrl, {
       method: "POST",
       mode:   "no-cors",
@@ -1999,8 +2057,10 @@ async function postToBackend(action, payload) {
         ...payload,
       }),
     });
+    // "submitted" intentionally — not "synced" — because no-cors gives no confirmation
     return { ok: true, mode: "submitted" };
   } catch (err) {
+    console.error("postToBackend network error:", err);
     return { ok: false, error: err };
   }
 }
@@ -2038,8 +2098,14 @@ function normalizeAttendance(record) {
   if (!record) return null;
   const timestamp = record.timestamp || record.scannedAt || new Date().toISOString();
   const date      = new Date(timestamp);
+  // FIX: Use a deterministic ID derived from studentId + timestamp so that
+  // repeated calls to normalizeAttendance on the same record always produce the
+  // same ID. Using Date.now() here caused a new ID on every call, breaking
+  // deduplication and Firestore document targeting.
+  const stableId = record.id || record.attendanceId ||
+    `ATT-${String(record.studentId || "unknown").replace(/[^a-z0-9]/gi, "")}-${new Date(timestamp).getTime()}`;
   return {
-    id:           String(record.id || record.attendanceId || `ATT-${Date.now()}`),
+    id:           String(stableId),
     studentId:    String(record.studentId || ""),
     name:         String(record.name      || ""),
     roll:         String(record.roll      || record.rollNumber || ""),
@@ -2119,6 +2185,34 @@ function escapeHtml(value) {
     .replaceAll('"',  "&quot;")
     .replaceAll("'",  "&#39;");
 }
+
+
+// ─── Expose functions to global scope for inline HTML onclick handlers ────────
+// Required because this file runs as type="module" which has its own scope.
+window.showSection               = showSection;
+window.startRegisterCamera       = startRegisterCamera;
+window.captureCurrentAngle       = captureCurrentAngle;
+window.captureRegisterPhoto      = captureRegisterPhoto;
+window.resetAllAngles            = resetAllAngles;
+window.retakeRegisterPhoto       = retakeRegisterPhoto;
+window.registerStudent           = registerStudent;
+window.checkExistingStudent      = checkExistingStudent;
+window.proceedAsUpdate           = proceedAsUpdate;
+window.cancelDuplicateRegistration = cancelDuplicateRegistration;
+window.startAttendanceCamera     = startAttendanceCamera;
+window.captureAttendancePhoto    = captureAttendancePhoto;
+window.showStudentsList          = showStudentsList;
+window.showAttendanceList        = showAttendanceList;
+window.openEditModal             = openEditModal;
+window.closeEditModal            = closeEditModal;
+window.saveEditStudent           = saveEditStudent;
+window.deleteStudent             = deleteStudent;
+window.deleteAttendanceRecord    = deleteAttendanceRecord;
+window.hideModal                 = hideModal;
+window.sendWhatsAppMessage       = sendWhatsAppMessage;
+window.exportAttendanceCSV       = exportAttendanceCSV;
+window.exportAttendancePDF       = exportAttendancePDF;
+window.clearAllData              = clearAllData;
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
