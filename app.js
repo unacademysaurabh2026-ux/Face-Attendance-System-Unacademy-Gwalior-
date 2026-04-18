@@ -8,27 +8,15 @@
 // ─── Google Sheets Backend ───────────────────────────────────
 const SHEETS_URL = "https://script.google.com/macros/s/AKfycbyDqArdI88Q2LrLaXx38EbtfKXSYLIWRlnhyU3r1ad6-Enytzsy6y9kE5njaO0sLF5pbg/exec";
 
-// POST to Google Sheets Apps Script
-async function sheetsPost(action, payload) {
+// Use GET requests — avoids all CORS/no-cors issues with Apps Script
+async function sheetsGet(params = {}) {
   try {
-    await fetch(SHEETS_URL, {
-      method: "POST",
-      mode: "no-cors",
-      headers: { "Content-Type": "text/plain" },
-      body: JSON.stringify({ action, ...payload }),
-    });
-  } catch (err) {
-    console.error("Sheets POST error:", err);
-  }
-}
-
-// GET all data from Google Sheets
-async function sheetsGet() {
-  try {
-    const res  = await fetch(SHEETS_URL);
+    const qs  = new URLSearchParams(params).toString();
+    const url = qs ? SHEETS_URL + "?" + qs : SHEETS_URL;
+    const res = await fetch(url);
     const data = await res.json();
     if (data.ok) return data;
-    console.error("Sheets GET error:", data.error);
+    console.error("Sheets error:", data.error);
     return null;
   } catch (err) {
     console.error("Sheets GET error:", err);
@@ -41,34 +29,47 @@ async function saveStudentToSheets(student) {
     if (!d) return [];
     try { return Array.from(d); } catch(e) { return []; }
   };
-  await sheetsPost("saveStudent", {
-    student: {
-      id:            student.id,
-      name:          student.name,
-      roll:          student.roll,
-      class:         student.class,
-      studentPhone:  student.studentPhone || "",
-      parentPhone:   student.parentPhone  || "",
-      embeddingCount:student.embeddingCount || 0,
-      descriptor:    serializeDesc(student.descriptor),
-      descriptors:   (student.descriptors || []).map(serializeDesc),
-      registeredOn:  student.registeredOn || new Date().toISOString(),
-    }
-  });
-  console.log("✅ Student saved to Sheets:", student.name);
+  const payload = {
+    id:            String(student.id || ""),
+    name:          String(student.name || ""),
+    roll:          String(student.roll || ""),
+    class:         String(student.class || ""),
+    studentPhone:  String(student.studentPhone || ""),
+    parentPhone:   String(student.parentPhone  || ""),
+    embeddingCount:Number(student.embeddingCount || 0),
+    descriptor:    serializeDesc(student.descriptor),
+    descriptors:   (student.descriptors || []).map(serializeDesc),
+    registeredOn:  String(student.registeredOn || new Date().toISOString()),
+  };
+  const result = await sheetsGet({ action: "saveStudent", data: JSON.stringify(payload) });
+  if (result) console.log("✅ Student saved to Sheets:", student.name);
+  else console.error("❌ Failed to save student to Sheets");
 }
 
 async function saveAttendanceToSheets(record) {
-  await sheetsPost("saveAttendance", { record });
-  console.log("✅ Attendance saved to Sheets:", record.name);
+  const payload = {
+    id:          String(record.id || ""),
+    studentId:   String(record.studentId || ""),
+    name:        String(record.name || ""),
+    roll:        String(record.roll || ""),
+    class:       String(record.class || ""),
+    studentPhone:String(record.studentPhone || ""),
+    parentPhone: String(record.parentPhone  || ""),
+    date:        String(record.date || ""),
+    timeLabel:   String(record.timeLabel || ""),
+    timestamp:   String(record.timestamp || new Date().toISOString()),
+    matchPercent:String(record.matchPercent || ""),
+  };
+  const result = await sheetsGet({ action: "saveAttendance", data: JSON.stringify(payload) });
+  if (result) console.log("✅ Attendance saved to Sheets:", record.name);
 }
 
 async function deleteStudentFromSheets(studentId) {
-  await sheetsPost("deleteStudent", { studentId });
+  await sheetsGet({ action: "deleteStudent", id: studentId });
 }
 
 async function deleteAttendanceFromSheets(recordId) {
-  await sheetsPost("deleteAttendance", { recordId });
+  await sheetsGet({ action: "deleteAttendance", id: recordId });
 }
 
 async function loadFromSheets() {
@@ -76,7 +77,6 @@ async function loadFromSheets() {
   if (!data) return null;
 
   const students = (data.students || []).map(s => {
-    // Deserialize descriptors from JSON strings stored in sheet
     let descriptor  = null;
     let descriptors = [];
     try { descriptor  = JSON.parse(s.descriptor  || "[]"); } catch(e) {}
