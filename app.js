@@ -8,13 +8,14 @@
 // ─── Firebase Setup ──────────────────────────────────────────
 // 🔧 REPLACE these values with your own Firebase project config
 // Get them from: https://console.firebase.google.com → Project Settings → Your Apps
-const FIREBASE_CONFIG = {
-  apiKey:            "YOUR_API_KEY",
-  authDomain:        "YOUR_PROJECT_ID.firebaseapp.com",
-  projectId:         "YOUR_PROJECT_ID",
-  storageBucket:     "YOUR_PROJECT_ID.appspot.com",
-  messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
-  appId:             "YOUR_APP_ID",
+const firebaseConfig = {
+  apiKey: "AIzaSyCJTZz7J2IXOiWUpvIQmuVwZCoyMOwrdZM",
+  authDomain: "face-scan-attendance-1419b.firebaseapp.com",
+  projectId: "face-scan-attendance-1419b",
+  storageBucket: "face-scan-attendance-1419b.firebasestorage.app",
+  messagingSenderId: "666886640084",
+  appId: "1:666886640084:web:33adaa3110708202120641",
+  measurementId: "G-QRC6FNHTVL"
 };
 
 // Guard: detect unconfigured placeholder credentials before attempting to connect.
