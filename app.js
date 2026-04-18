@@ -70,11 +70,14 @@ async function saveStudentToFirebase(student) {
   if (!db) return;
   try {
     const { doc, setDoc } = window._fs;
-    // Descriptors must be stored as plain arrays (Firestore-safe)
+    // Firestore does NOT support nested arrays (array-of-arrays).
+    // Serialize each Float32Array descriptor as a comma-joined string so it
+    // can be stored as a flat array of strings and decoded on load.
+    const serializeDesc = d => d ? Array.from(d).join(",") : null;
     const payload = {
       ...student,
-      descriptors: (student.descriptors || []).map(d => Array.from(d)),
-      descriptor:  student.descriptor ? Array.from(student.descriptor) : null,
+      descriptors: (student.descriptors || []).map(serializeDesc),
+      descriptor:  serializeDesc(student.descriptor),
       // Remove binary blob – facePhoto (base64) can be large; keep it but
       // Firestore has a 1 MB per-document limit. If photos cause quota errors,
       // store them in Firebase Storage instead and save the download URL here.
@@ -2070,13 +2073,21 @@ async function postToBackend(action, payload) {
 function normalizeStudent(student) {
   if (!student) return null;
 
+  // Descriptors may be stored as comma-joined strings (new format) or plain arrays (old format).
+  // Deserialize either format back into plain number arrays for face-api.js.
+  const deserializeDesc = d => {
+    if (!d) return null;
+    if (typeof d === "string") return d.split(",").map(Number);
+    if (Array.isArray(d)) return d.map(Number);
+    return null;
+  };
+
   let descriptors = null;
   if (Array.isArray(student.descriptors) && student.descriptors.length > 0) {
-    descriptors = student.descriptors.map(d => Array.isArray(d) ? d.map(Number) : null).filter(Boolean);
+    descriptors = student.descriptors.map(deserializeDesc).filter(Boolean);
   }
 
-  const descriptor = Array.isArray(student.descriptor)
-    ? student.descriptor.map(Number) : null;
+  const descriptor = deserializeDesc(student.descriptor);
 
   return {
     id:           String(student.id || buildStudentId(student.className || student.class, student.roll || student.rollNumber)),
