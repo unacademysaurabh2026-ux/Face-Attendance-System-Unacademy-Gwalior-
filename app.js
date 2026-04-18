@@ -6,30 +6,26 @@
 // ============================================================
 
 // ─── Google Sheets Backend ───────────────────────────────────
+// Simple GET-based API — no CORS issues, works everywhere
 const SHEETS_URL = "https://script.google.com/macros/s/AKfycbyDqArdI88Q2LrLaXx38EbtfKXSYLIWRlnhyU3r1ad6-Enytzsy6y9kE5njaO0sLF5pbg/exec";
 
-// Use GET requests — avoids all CORS/no-cors issues with Apps Script
-async function sheetsGet(params = {}) {
+async function sheetsCall(params) {
   try {
-    const qs  = new URLSearchParams(params).toString();
-    const url = qs ? SHEETS_URL + "?" + qs : SHEETS_URL;
-    const res = await fetch(url);
-    const data = await res.json();
-    if (data.ok) return data;
-    console.error("Sheets error:", data.error);
-    return null;
-  } catch (err) {
-    console.error("Sheets GET error:", err);
+    const url = SHEETS_URL + "?" + new URLSearchParams(params).toString();
+    const res  = await fetch(url);
+    const text = await res.text();
+    const data = JSON.parse(text);
+    return data;
+  } catch(err) {
+    console.error("Sheets error:", err);
     return null;
   }
 }
 
 async function saveStudentToSheets(student) {
-  const serializeDesc = d => {
-    if (!d) return [];
-    try { return Array.from(d); } catch(e) { return []; }
-  };
-  const payload = {
+  // Only save non-descriptor info — descriptors are too large for URLs
+  // Face recognition data stays in localStorage on the registration device
+  const slim = {
     id:            String(student.id || ""),
     name:          String(student.name || ""),
     roll:          String(student.roll || ""),
@@ -37,17 +33,15 @@ async function saveStudentToSheets(student) {
     studentPhone:  String(student.studentPhone || ""),
     parentPhone:   String(student.parentPhone  || ""),
     embeddingCount:Number(student.embeddingCount || 0),
-    descriptor:    serializeDesc(student.descriptor),
-    descriptors:   (student.descriptors || []).map(serializeDesc),
-    registeredOn:  String(student.registeredOn || new Date().toISOString()),
+    registeredOn:  String(student.registeredOn  || new Date().toISOString()),
   };
-  const result = await sheetsGet({ action: "saveStudent", data: JSON.stringify(payload) });
-  if (result) console.log("✅ Student saved to Sheets:", student.name);
-  else console.error("❌ Failed to save student to Sheets");
+  const result = await sheetsCall({ action: "saveStudent", data: JSON.stringify(slim) });
+  if (result && result.ok) console.log("✅ Student saved to Sheets:", student.name);
+  else console.error("❌ Sheets save failed:", result);
 }
 
 async function saveAttendanceToSheets(record) {
-  const payload = {
+  const slim = {
     id:          String(record.id || ""),
     studentId:   String(record.studentId || ""),
     name:        String(record.name || ""),
@@ -60,30 +54,29 @@ async function saveAttendanceToSheets(record) {
     timestamp:   String(record.timestamp || new Date().toISOString()),
     matchPercent:String(record.matchPercent || ""),
   };
-  const result = await sheetsGet({ action: "saveAttendance", data: JSON.stringify(payload) });
-  if (result) console.log("✅ Attendance saved to Sheets:", record.name);
+  const result = await sheetsCall({ action: "saveAttendance", data: JSON.stringify(slim) });
+  if (result && result.ok) console.log("✅ Attendance saved to Sheets:", record.name);
 }
 
 async function deleteStudentFromSheets(studentId) {
-  await sheetsGet({ action: "deleteStudent", id: studentId });
+  await sheetsCall({ action: "deleteStudent", id: String(studentId) });
 }
 
 async function deleteAttendanceFromSheets(recordId) {
-  await sheetsGet({ action: "deleteAttendance", id: recordId });
+  await sheetsCall({ action: "deleteAttendance", id: String(recordId) });
 }
 
 async function loadFromSheets() {
-  const data = await sheetsGet();
-  if (!data) return null;
-
+  const data = await sheetsCall({});
+  if (!data || !data.ok) return null;
+  // Merge sheet students with localStorage descriptors for face recognition
+  const localStudents = (() => {
+    try { return JSON.parse(localStorage.getItem("face-attendance-students") || "[]"); } catch(e) { return []; }
+  })();
   const students = (data.students || []).map(s => {
-    let descriptor  = null;
-    let descriptors = [];
-    try { descriptor  = JSON.parse(s.descriptor  || "[]"); } catch(e) {}
-    try { descriptors = JSON.parse(s.descriptors || "[]"); } catch(e) {}
-    return normalizeStudent({ ...s, descriptor, descriptors });
+    const local = localStudents.find(l => l && l.id === s.id);
+    return normalizeStudent({ ...s, descriptor: local?.descriptor || null, descriptors: local?.descriptors || [] });
   }).filter(Boolean);
-
   const attendance = (data.attendance || []).map(a => normalizeAttendance(a)).filter(Boolean);
   return { students, attendance };
 }
