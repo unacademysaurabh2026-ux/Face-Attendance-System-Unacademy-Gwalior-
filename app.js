@@ -1,108 +1,503 @@
 // ============================================================
 //  FaceScan Attendance  –  Production-Grade app.js
-//  ⬆ Upgraded: multi-angle registration (Front/Left/Right),
-//    delete/edit student records, duplicate detection,
-//    CSV & PDF export
+//  ⬆ Upgraded: GitHub face storage, Google Sheets logging,
+//    Twilio WhatsApp notifications (auto-send on attendance)
 // ============================================================
 
-// ─── Google Sheets Backend ───────────────────────────────────
-let db = null; // kept as null — using Google Sheets instead of Firebase
-const SHEETS_URL = "https://script.google.com/macros/s/AKfycbyDqArdI88Q2LrLaXx38EbtfKXSYLIWRlnhyU3r1ad6-Enytzsy6y9kE5njaO0sLF5pbg/exec";
+// ─── GitHub Configuration ─────────────────────────────────────
+const GITHUB_CONFIG = {
+  token:    "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",
+  repo:     "Face-Attendance-System-Unacademy-Gwalior-",
+  owner:    "",          // auto-detected from token on first use
+  branch:   "main",
+  dataFile: "students/students.json",
+};
 
-// POST to Google Sheets Apps Script
-async function sheetsPost(action, payload) {
+// ─── Google Sheets Configuration ─────────────────────────────
+const SHEETS_CONFIG = {
+  spreadsheetId: "1Dzqhmah07HTiEIIORcH0USpZ1R6KQVPfrWerNnZiw4Q",
+  // Apps Script Web App URL – deploy your Apps Script and paste URL here
+  // See README in the repo for setup instructions.
+  appsScriptUrl: "",   // set via Settings or window.FACESCAN_CONFIG
+};
+
+// ─── Twilio WhatsApp Configuration ───────────────────────────
+const TWILIO_CONFIG = {
+  accountSid:  "AC6754236d2cfbd4b90ee366eea8ed0e7a",
+  authToken:   "7fb0c9811550e44f472d55e4b889864a",
+  fromNumber:  "whatsapp:+14155238886",
+  adminNumbers: [
+    "whatsapp:+918085470776",
+    "whatsapp:+918770773672",
+  ],
+};
+
+// ─── Firebase Setup ──────────────────────────────────────────
+const firebaseConfig = {
+  apiKey:            "AIzaSyCJTZz7J2IXOiWUpvIQmuVwZCoyMOwrdZM",
+  authDomain:        "face-scan-attendance-1419b.firebaseapp.com",
+  projectId:         "face-scan-attendance-1419b",
+  storageBucket:     "face-scan-attendance-1419b.firebasestorage.app",
+  messagingSenderId: "666886640084",
+  appId:             "1:666886640084:web:33adaa3110708202120641",
+  measurementId:     "G-QRC6FNHTVL",
+};
+
+function isFirebaseConfigPlaceholder() {
+  return (
+    !firebaseConfig.apiKey ||
+    firebaseConfig.apiKey === "YOUR_API_KEY" ||
+    firebaseConfig.projectId === "YOUR_PROJECT_ID"
+  );
+}
+
+let db = null;
+
+async function initFirebase() {
+  if (isFirebaseConfigPlaceholder()) {
+    console.warn("⚠️ Firebase config has placeholder values. Falling back to GitHub/localStorage.");
+    if (typeof window.setFirebaseStatus === "function") window.setFirebaseStatus(false);
+    return false;
+  }
   try {
-    await fetch(SHEETS_URL, {
-      method: "POST",
-      mode: "no-cors",
-      headers: { "Content-Type": "text/plain" },
-      body: JSON.stringify({ action, ...payload }),
+    const { initializeApp } = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js");
+    const { getFirestore, collection, doc, setDoc, getDocs, deleteDoc, addDoc, query, orderBy, onSnapshot } =
+      await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js");
+
+    const app = initializeApp(firebaseConfig);
+    db = getFirestore(app);
+    window._fs = { collection, doc, setDoc, getDocs, deleteDoc, addDoc, query, orderBy, onSnapshot };
+    console.log("✅ Firebase connected.");
+    if (typeof window.setFirebaseStatus === "function") window.setFirebaseStatus(true);
+    return true;
+  } catch (err) {
+    console.error("❌ Firebase init failed:", err);
+    if (typeof window.setFirebaseStatus === "function") window.setFirebaseStatus(false);
+    return false;
+  }
+}
+
+// ─── Firebase: Students ──────────────────────────────────────
+async function saveStudentToFirebase(student) {
+  if (!db) return;
+  try {
+    const { doc, setDoc } = window._fs;
+    const serializeDesc = d => d ? Array.from(d).join(",") : null;
+    const payload = {
+      ...student,
+      descriptors: (student.descriptors || []).map(serializeDesc),
+      descriptor:  serializeDesc(student.descriptor),
+      facePhoto:   student.facePhoto || "",
+      angleData:   student.angleData
+        ? Object.fromEntries(
+            Object.entries(student.angleData).map(([k, v]) => [
+              k, v ? { count: v.count || 0 } : null,
+            ])
+          )
+        : null,
+    };
+    await setDoc(doc(db, "students", student.id), payload);
+  } catch (err) {
+    console.error("saveStudentToFirebase error:", err);
+  }
+}
+
+async function loadStudentsFromFirebase() {
+  if (!db) return [];
+  try {
+    const { collection, getDocs } = window._fs;
+    const snapshot = await getDocs(collection(db, "students"));
+    return snapshot.docs.map(d => normalizeStudent(d.data()));
+  } catch (err) {
+    console.error("loadStudentsFromFirebase error:", err);
+    return [];
+  }
+}
+
+async function deleteStudentFromFirebase(studentId) {
+  if (!db) return;
+  try {
+    const { doc, deleteDoc } = window._fs;
+    await deleteDoc(doc(db, "students", studentId));
+  } catch (err) {
+    console.error("deleteStudentFromFirebase error:", err);
+  }
+}
+
+async function saveAttendanceToFirebase(record) {
+  if (!db) return;
+  try {
+    const { doc, setDoc } = window._fs;
+    const payload = { ...record, scanPhoto: "" };
+    await setDoc(doc(db, "attendance", record.id), payload);
+  } catch (err) {
+    console.error("saveAttendanceToFirebase error:", err);
+  }
+}
+
+async function loadAttendanceFromFirebase() {
+  if (!db) return [];
+  try {
+    const { collection, getDocs, query, orderBy } = window._fs;
+    const q        = query(collection(db, "attendance"), orderBy("timestamp", "desc"));
+    const snapshot = await getDocs(q);
+    return snapshot.docs.map(d => normalizeAttendance(d.data()));
+  } catch (err) {
+    console.error("loadAttendanceFromFirebase error:", err);
+    return [];
+  }
+}
+
+async function deleteAttendanceFromFirebase(recordId) {
+  if (!db) return;
+  try {
+    const { doc, deleteDoc } = window._fs;
+    await deleteDoc(doc(db, "attendance", recordId));
+  } catch (err) {
+    console.error("deleteAttendanceFromFirebase error:", err);
+  }
+}
+
+function subscribeToStudents() {
+  if (!db) return;
+  const { collection, onSnapshot } = window._fs;
+  onSnapshot(collection(db, "students"), (snapshot) => {
+    state.students = snapshot.docs.map(d => normalizeStudent(d.data()));
+    updateDashboardStats();
+    renderStudentsGrid();
+  }, (err) => console.error("Students listener error:", err));
+}
+
+function subscribeToAttendance() {
+  if (!db) return;
+  const { collection, onSnapshot, query, orderBy } = window._fs;
+  const q = query(collection(db, "attendance"), orderBy("timestamp", "desc"));
+  onSnapshot(q, (snapshot) => {
+    state.attendances = snapshot.docs.map(d => normalizeAttendance(d.data()));
+    updateDashboardStats();
+    renderAttendanceTable();
+  }, (err) => console.error("Attendance listener error:", err));
+}
+
+// ─── GitHub Storage ───────────────────────────────────────────
+// Resolves the GitHub owner (username) from the token once, caches it.
+async function resolveGitHubOwner() {
+  if (GITHUB_CONFIG.owner) return GITHUB_CONFIG.owner;
+  try {
+    const res  = await fetch("https://api.github.com/user", {
+      headers: {
+        Authorization: `token ${GITHUB_CONFIG.token}`,
+        Accept:        "application/vnd.github.v3+json",
+      },
     });
-  } catch (err) {
-    console.error("Sheets POST error:", err);
-  }
-}
-
-// GET all data from Google Sheets
-async function sheetsGet() {
-  try {
-    const res  = await fetch(SHEETS_URL);
     const data = await res.json();
-    if (data.ok) return data;
-    console.error("Sheets GET error:", data.error);
-    return null;
+    GITHUB_CONFIG.owner = data.login || "";
+    return GITHUB_CONFIG.owner;
   } catch (err) {
-    console.error("Sheets GET error:", err);
+    console.error("GitHub owner resolution failed:", err);
+    return "";
+  }
+}
+
+async function githubGetFile(path) {
+  const owner = await resolveGitHubOwner();
+  if (!owner) return null;
+  try {
+    const res = await fetch(
+      `https://api.github.com/repos/${owner}/${GITHUB_CONFIG.repo}/contents/${path}`,
+      {
+        headers: {
+          Authorization: `token ${GITHUB_CONFIG.token}`,
+          Accept:        "application/vnd.github.v3+json",
+        },
+      }
+    );
+    if (!res.ok) return null;
+    return await res.json();   // { content (base64), sha, ... }
+  } catch (err) {
+    console.error("githubGetFile error:", err);
     return null;
   }
 }
 
-async function saveStudentToSheets(student) {
-  const serializeDesc = d => {
-    if (!d) return [];
-    try { return Array.from(d); } catch(e) { return []; }
-  };
-  await sheetsPost("saveStudent", {
-    student: {
-      id:            student.id,
-      name:          student.name,
-      roll:          student.roll,
-      class:         student.class,
-      studentPhone:  student.studentPhone || "",
-      parentPhone:   student.parentPhone  || "",
-      embeddingCount:student.embeddingCount || 0,
-      descriptor:    serializeDesc(student.descriptor),
-      descriptors:   (student.descriptors || []).map(serializeDesc),
-      registeredOn:  student.registeredOn || new Date().toISOString(),
+async function githubPutFile(path, contentString, message, sha) {
+  const owner = await resolveGitHubOwner();
+  if (!owner) return false;
+  try {
+    const body = {
+      message,
+      content: btoa(unescape(encodeURIComponent(contentString))),
+      branch:  GITHUB_CONFIG.branch,
+    };
+    if (sha) body.sha = sha;
+
+    const res = await fetch(
+      `https://api.github.com/repos/${owner}/${GITHUB_CONFIG.repo}/contents/${path}`,
+      {
+        method:  "PUT",
+        headers: {
+          Authorization: `token ${GITHUB_CONFIG.token}`,
+          Accept:        "application/vnd.github.v3+json",
+          "Content-Type":"application/json",
+        },
+        body: JSON.stringify(body),
+      }
+    );
+    return res.ok;
+  } catch (err) {
+    console.error("githubPutFile error:", err);
+    return false;
+  }
+}
+
+// Saves a student's face photo as an image file in GitHub.
+// Returns the raw GitHub URL of the saved image (or empty string on failure).
+async function saveStudentPhotoToGitHub(studentId, base64DataUrl) {
+  if (!base64DataUrl || !base64DataUrl.startsWith("data:image")) return "";
+  const owner = await resolveGitHubOwner();
+  if (!owner) return "";
+
+  try {
+    // Strip the data URL header to get raw base64
+    const base64 = base64DataUrl.split(",")[1];
+    const path   = `students/photos/${studentId}.jpg`;
+
+    // Check if file already exists (to get sha for update)
+    const existing = await githubGetFile(path);
+    const sha      = existing?.sha || undefined;
+
+    const body = {
+      message: `Update photo for student ${studentId}`,
+      content: base64,
+      branch:  GITHUB_CONFIG.branch,
+    };
+    if (sha) body.sha = sha;
+
+    const res = await fetch(
+      `https://api.github.com/repos/${owner}/${GITHUB_CONFIG.repo}/contents/${path}`,
+      {
+        method:  "PUT",
+        headers: {
+          Authorization: `token ${GITHUB_CONFIG.token}`,
+          Accept:        "application/vnd.github.v3+json",
+          "Content-Type":"application/json",
+        },
+        body: JSON.stringify(body),
+      }
+    );
+
+    if (res.ok) {
+      const data = await res.json();
+      return data.content?.download_url || "";
     }
-  });
-  console.log("✅ Student saved to Sheets:", student.name);
+    return "";
+  } catch (err) {
+    console.error("saveStudentPhotoToGitHub error:", err);
+    return "";
+  }
 }
 
-async function saveAttendanceToSheets(record) {
-  await sheetsPost("saveAttendance", { record });
-  console.log("✅ Attendance saved to Sheets:", record.name);
+// Saves all student identity data (descriptors etc.) to GitHub as JSON.
+async function saveStudentsToGitHub(students) {
+  try {
+    const path = GITHUB_CONFIG.dataFile;
+    const existing = await githubGetFile(path);
+    const sha      = existing?.sha || undefined;
+
+    // Strip large base64 photos from the JSON – they're stored separately as image files
+    const sanitized = students.map(s => ({
+      ...s,
+      facePhoto:   s.githubPhotoUrl || "",   // store GitHub URL not base64
+      descriptors: (s.descriptors || []).map(d => d ? Array.from(d) : null).filter(Boolean),
+      descriptor:  s.descriptor ? Array.from(s.descriptor) : null,
+      angleData:   s.angleData
+        ? Object.fromEntries(
+            Object.entries(s.angleData).map(([k, v]) => [
+              k, v ? { count: v.count || 0 } : null,
+            ])
+          )
+        : null,
+    }));
+
+    const content = JSON.stringify(sanitized, null, 2);
+    const ok = await githubPutFile(path, content, "Update student identities", sha);
+    if (ok) console.log("✅ Students saved to GitHub.");
+    return ok;
+  } catch (err) {
+    console.error("saveStudentsToGitHub error:", err);
+    return false;
+  }
 }
 
-async function deleteStudentFromSheets(studentId) {
-  await sheetsPost("deleteStudent", { studentId });
+// Loads student identity data from GitHub.
+async function loadStudentsFromGitHub() {
+  try {
+    const file = await githubGetFile(GITHUB_CONFIG.dataFile);
+    if (!file?.content) return [];
+    const decoded = decodeURIComponent(escape(atob(file.content.replace(/\n/g, ""))));
+    const parsed  = JSON.parse(decoded);
+    return Array.isArray(parsed) ? parsed.map(normalizeStudent).filter(Boolean) : [];
+  } catch (err) {
+    console.error("loadStudentsFromGitHub error:", err);
+    return [];
+  }
 }
 
-async function deleteAttendanceFromSheets(recordId) {
-  await sheetsPost("deleteAttendance", { recordId });
+// ─── Google Sheets via Apps Script ───────────────────────────
+// Posts attendance record to Google Sheets via an Apps Script web app.
+async function logAttendanceToGoogleSheets(record) {
+  const url = state.settings.appsScriptUrl || SHEETS_CONFIG.appsScriptUrl;
+  if (!url) return { ok: false, reason: "no-url" };
+  try {
+    await fetch(url, {
+      method: "POST",
+      mode:   "no-cors",
+      headers:{ "Content-Type": "text/plain;charset=utf-8" },
+      body:   JSON.stringify({
+        action:        "logAttendance",
+        spreadsheetId: SHEETS_CONFIG.spreadsheetId,
+        instituteName: state.settings.instituteName,
+        deviceLabel:   state.settings.deviceLabel,
+        sentAt:        new Date().toISOString(),
+        attendance: {
+          attendanceId:  record.id,
+          studentId:     record.studentId,
+          name:          record.name,
+          rollNumber:    record.roll,
+          className:     record.class,
+          studentMobile: record.studentPhone,
+          parentMobile:  record.parentPhone,
+          scannedAt:     record.timestamp,
+          dateKey:       record.dateKey,
+          dateLabel:     record.dateLabel,
+          timeLabel:     record.timeLabel,
+          matchDistance: record.matchDistance || 0,
+          matchPercent:  record.matchPercent  || 0,
+        },
+      }),
+    });
+    return { ok: true, mode: "submitted" };
+  } catch (err) {
+    console.error("logAttendanceToGoogleSheets error:", err);
+    return { ok: false, error: err };
+  }
 }
 
-async function loadFromSheets() {
-  const data = await sheetsGet();
-  if (!data) return null;
-
-  const students = (data.students || []).map(s => {
-    // Deserialize descriptors from JSON strings stored in sheet
-    let descriptor  = null;
-    let descriptors = [];
-    try { descriptor  = JSON.parse(s.descriptor  || "[]"); } catch(e) {}
-    try { descriptors = JSON.parse(s.descriptors || "[]"); } catch(e) {}
-    return normalizeStudent({ ...s, descriptor, descriptors });
-  }).filter(Boolean);
-
-  const attendance = (data.attendance || []).map(a => normalizeAttendance(a)).filter(Boolean);
-  return { students, attendance };
+async function postToBackend(action, payload) {
+  if (!state.settings.appsScriptUrl && !SHEETS_CONFIG.appsScriptUrl) return { ok: true, mode: "local-only" };
+  const url = state.settings.appsScriptUrl || SHEETS_CONFIG.appsScriptUrl;
+  try {
+    await fetch(url, {
+      method: "POST",
+      mode:   "no-cors",
+      headers:{ "Content-Type": "text/plain;charset=utf-8" },
+      body:   JSON.stringify({
+        action,
+        instituteName: state.settings.instituteName,
+        deviceLabel:   state.settings.deviceLabel,
+        sentAt:        new Date().toISOString(),
+        ...payload,
+      }),
+    });
+    return { ok: true, mode: "submitted" };
+  } catch (err) {
+    console.error("postToBackend network error:", err);
+    return { ok: false, error: err };
+  }
 }
 
-// ─── Storage Keys (kept for settings only) ───────────────────
+// ─── Twilio WhatsApp ──────────────────────────────────────────
+// Sends a WhatsApp message via Twilio REST API.
+// NOTE: Twilio API does not support direct browser calls (CORS restriction).
+// This function works in environments that allow it (e.g. via a proxy/backend).
+// If CORS fails, it gracefully falls back to the wa.me link method.
+async function sendTwilioWhatsApp(toNumber, messageBody) {
+  const { accountSid, authToken, fromNumber } = TWILIO_CONFIG;
+  const url = `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`;
+
+  const formData = new URLSearchParams();
+  formData.append("From", fromNumber);
+  formData.append("To",   toNumber);
+  formData.append("Body", messageBody);
+
+  try {
+    const res = await fetch(url, {
+      method:  "POST",
+      headers: {
+        Authorization: "Basic " + btoa(`${accountSid}:${authToken}`),
+        "Content-Type":"application/x-www-form-urlencoded",
+      },
+      body: formData.toString(),
+    });
+    if (res.ok) {
+      console.log(`✅ WhatsApp sent to ${toNumber}`);
+      return true;
+    } else {
+      const err = await res.json();
+      console.warn(`Twilio error to ${toNumber}:`, err.message);
+      return false;
+    }
+  } catch (err) {
+    console.warn(`Twilio fetch failed for ${toNumber} (possibly CORS). Using wa.me fallback.`, err);
+    return false;
+  }
+}
+
+// Sends WhatsApp notifications to both admin numbers and optionally the parent.
+async function sendAttendanceWhatsApp(record) {
+  const instituteName = state.settings.instituteName || "FaceScan Attendance";
+  const studentMsg =
+    `✅ *Attendance Marked*\n\n` +
+    `👤 Student: *${record.name}*\n` +
+    `📋 Roll No: ${record.roll}\n` +
+    `🏫 Class: ${record.class}\n` +
+    `🕐 Time: ${record.formattedTime}\n` +
+    `📊 Match: ${record.matchPercent != null ? record.matchPercent + "%" : "Confirmed"}\n\n` +
+    `— ${instituteName}`;
+
+  const parentMsg =
+    `Dear Parent,\n\n` +
+    `Your ward *${record.name}* (Roll No. ${record.roll}, ${record.class}) ` +
+    `has marked attendance today.\n\n` +
+    `🕐 Time: ${record.formattedTime}\n\n` +
+    `Thank you!\n${instituteName}`;
+
+  // Send to both admin numbers
+  const adminPromises = TWILIO_CONFIG.adminNumbers.map(num =>
+    sendTwilioWhatsApp(num, studentMsg)
+  );
+
+  // Send to parent if phone is available
+  const parentPromises = [];
+  if (record.parentPhone) {
+    const parentNum = `whatsapp:+${normalizeWhatsappNumber(record.parentPhone)}`;
+    parentPromises.push(sendTwilioWhatsApp(parentNum, parentMsg));
+  }
+
+  const results = await Promise.allSettled([...adminPromises, ...parentPromises]);
+  const anySuccess = results.some(r => r.status === "fulfilled" && r.value === true);
+
+  // Fallback: if Twilio CORS failed for admin numbers, open wa.me for parent at minimum
+  if (!anySuccess && record.parentPhone) {
+    openWhatsappForRecord(record);
+  }
+
+  return anySuccess;
+}
+
+// ─── Storage Keys ─────────────────────────────────────────────
 const STORAGE_KEYS = {
   settings:        "face-attendance-settings",
-  // Legacy keys – read once on first load to migrate old data, then ignored
   students:        "face-attendance-students",
   attendance:      "face-attendance-log",
   legacyStudents:  "facscan_students",
   legacyAttendance:"facscan_attendances",
 };
 
-// ─── Defaults ────────────────────────────────────────────────
+// ─── Defaults ─────────────────────────────────────────────────
 const DEFAULT_SETTINGS = {
   instituteName: "FaceScan Attendance",
-  deviceLabel: "Institute Device",
+  deviceLabel:   "Institute Device",
   appsScriptUrl: "",
   matchThreshold: 0.42,
   modelUrl: "https://cdn.jsdelivr.net/gh/vladmandic/face-api/model/",
@@ -111,8 +506,8 @@ const DEFAULT_SETTINGS = {
 // ─── Registration constants ───────────────────────────────────
 const REG_VIDEO_DURATION_MS    = 3000;
 const REG_FRAME_INTERVAL_MS    = 90;
-const REG_TARGET_EMBEDDINGS    = 10;   // per angle
-const REG_MIN_EMBEDDINGS       = 3;    // per angle minimum
+const REG_TARGET_EMBEDDINGS    = 10;
+const REG_MIN_EMBEDDINGS       = 3;
 const REG_MIN_FACE_FRACTION    = 0.08;
 const REG_MAX_FACE_FRACTION    = 0.80;
 const REG_LAPLACIAN_THRESHOLD  = 60;
@@ -120,7 +515,7 @@ const REG_CENTER_TOLERANCE     = 0.35;
 const REG_DUP_DISTANCE         = 0.08;
 const REG_DETECTION_SCORE_MIN  = 0.68;
 
-// ─── Angle definitions ───────────────────────────────────────
+// ─── Angle definitions ────────────────────────────────────────
 const ANGLES = [
   { key: "front", label: "😐 Front Face", icon: "😐", instruction: "Look straight at the camera" },
   { key: "left",  label: "← Left Face",  icon: "←",  instruction: "Slowly turn your head to the LEFT" },
@@ -128,15 +523,15 @@ const ANGLES = [
 ];
 
 // ─── Live attendance constants ────────────────────────────────
-const LIVE_RECOGNITION_INTERVAL_MS    = 400;
-const LIVE_REQUIRED_STABLE_MATCHES    = 4;
-const LIVE_DYNAMIC_THRESHOLD_BOOST    = 0.06;
-const LIVE_BLINK_EYE_DIFF_THRESHOLD   = 1.8;
-const LIVE_MOVEMENT_LANDMARK_DELTA    = 2.5;
-const LIVE_LIVENESS_FRAMES_REQUIRED   = 3;
-const LIVE_MULTI_FACE_MAX             = 4;
+const LIVE_RECOGNITION_INTERVAL_MS  = 400;
+const LIVE_REQUIRED_STABLE_MATCHES  = 4;
+const LIVE_DYNAMIC_THRESHOLD_BOOST  = 0.06;
+const LIVE_BLINK_EYE_DIFF_THRESHOLD = 1.8;
+const LIVE_MOVEMENT_LANDMARK_DELTA  = 2.5;
+const LIVE_LIVENESS_FRAMES_REQUIRED = 3;
+const LIVE_MULTI_FACE_MAX           = 4;
 
-// ─── App State ───────────────────────────────────────────────
+// ─── App State ────────────────────────────────────────────────
 const state = {
   settings: { ...DEFAULT_SETTINGS },
   students: [],
@@ -144,14 +539,12 @@ const state = {
   currentStream: null,
   currentCameraMode: null,
 
-  // Registration – per-angle data
-  registerPhoto: null,         // best frame overall (for profile pic)
-  registerDescriptors: null,   // final merged array
-  angleData: { front: null, left: null, right: null },  // {descriptors, photo}
-  currentAngleIndex: 0,        // 0=front 1=left 2=right
-  isUpdateMode: false,         // true when editing existing student
+  registerPhoto: null,
+  registerDescriptors: null,
+  angleData: { front: null, left: null, right: null },
+  currentAngleIndex: 0,
+  isUpdateMode: false,
 
-  // Attendance
   attendancePhoto: null,
   liveMatches: [],
   selectedAttendanceStudentId: null,
@@ -173,11 +566,12 @@ const state = {
   regCollectedDescriptors: [],
   regCollectedPhotos: [],
   regProgress: 0,
+
+  githubReady: false,
 };
 
 const dom = {};
 
-// type="module" scripts run after DOM is parsed; use DOMContentLoaded for reliability
 if (document.readyState === "loading") {
   document.addEventListener("DOMContentLoaded", initApp);
 } else {
@@ -187,26 +581,36 @@ if (document.readyState === "loading") {
 // ─── Init ─────────────────────────────────────────────────────
 async function initApp() {
   assignDom();
-  loadSettings();           // load only settings from localStorage
+  loadSettings();
   renderStaticLabels();
   updateClock();
   window.setInterval(updateClock, 1000);
   showSection("home");
   setupOverlayCanvas();
 
-  // Load data from Google Sheets
-  showLoadingBanner("Loading data...");
-  const sheetsData = await loadFromSheets();
-  if (sheetsData) {
-    state.students    = sheetsData.students;
-    state.attendances = sheetsData.attendance;
-    if (typeof window.setFirebaseStatus === "function") window.setFirebaseStatus(true);
-    console.log("✅ Loaded from Google Sheets:", state.students.length, "students");
+  showLoadingBanner("Connecting to Firebase…");
+  const firebaseReady = await initFirebase();
+
+  if (firebaseReady) {
+    showLoadingBanner("Loading students & attendance…");
+    [state.students, state.attendances] = await Promise.all([
+      loadStudentsFromFirebase(),
+      loadAttendanceFromFirebase(),
+    ]);
+    subscribeToStudents();
+    subscribeToAttendance();
   } else {
-    // Fallback to localStorage if Sheets unavailable
-    console.warn("Sheets unavailable - falling back to localStorage.");
-    if (typeof window.setFirebaseStatus === "function") window.setFirebaseStatus(false);
-    loadData();
+    console.warn("Firebase unavailable – trying GitHub storage…");
+    showLoadingBanner("Loading students from GitHub…");
+    const ghStudents = await loadStudentsFromGitHub();
+    if (ghStudents.length) {
+      state.students = ghStudents;
+      state.githubReady = true;
+      console.log(`✅ Loaded ${ghStudents.length} students from GitHub.`);
+    } else {
+      console.warn("GitHub load returned 0 students – falling back to localStorage.");
+      loadData();
+    }
   }
 
   hideLoadingBanner();
@@ -215,7 +619,7 @@ async function initApp() {
   renderAttendanceTable();
 }
 
-// ─── Loading Banner Helpers ───────────────────────────────────
+// ─── Loading Banner ───────────────────────────────────────────
 function showLoadingBanner(msg) {
   let banner = document.getElementById("fb-loading-banner");
   if (!banner) {
@@ -254,15 +658,15 @@ function assignDom() {
   dom.registerStatus       = document.getElementById("register-status");
   dom.captureAngleBtn      = document.getElementById("capture-angle-btn");
 
-  dom.attendanceVideo          = document.getElementById("attendance-video");
-  dom.attendanceCanvas         = document.getElementById("attendance-canvas");
-  dom.startAttendanceButton    = document.getElementById("start-attendance-btn");
-  dom.captureAttendanceButton  = document.getElementById("capture-attendance-btn");
-  dom.attendanceStatus         = document.getElementById("attendance-status");
-  dom.recognitionResult        = document.getElementById("recognition-result");
-  dom.recognitionTitle         = document.getElementById("recognition-title");
-  dom.recognitionCopy          = document.getElementById("recognition-copy");
-  dom.studentMatchList         = document.getElementById("student-match-list");
+  dom.attendanceVideo         = document.getElementById("attendance-video");
+  dom.attendanceCanvas        = document.getElementById("attendance-canvas");
+  dom.startAttendanceButton   = document.getElementById("start-attendance-btn");
+  dom.captureAttendanceButton = document.getElementById("capture-attendance-btn");
+  dom.attendanceStatus        = document.getElementById("attendance-status");
+  dom.recognitionResult       = document.getElementById("recognition-result");
+  dom.recognitionTitle        = document.getElementById("recognition-title");
+  dom.recognitionCopy         = document.getElementById("recognition-copy");
+  dom.studentMatchList        = document.getElementById("student-match-list");
 
   dom.studentsGrid        = document.getElementById("students-grid");
   dom.attendanceTableBody = document.getElementById("attendance-table-body");
@@ -271,11 +675,11 @@ function assignDom() {
   dom.showStudentsButton  = document.getElementById("show-students-btn");
   dom.showAttendanceButton= document.getElementById("show-attendance-btn");
 
-  dom.successModal         = document.getElementById("success-modal");
-  dom.modalTitle           = document.getElementById("modal-title");
-  dom.modalSubtitle        = document.getElementById("modal-subtitle");
-  dom.modalDetails         = document.getElementById("modal-details");
-  dom.modalWhatsappButton  = document.getElementById("modal-whatsapp-btn");
+  dom.successModal        = document.getElementById("success-modal");
+  dom.modalTitle          = document.getElementById("modal-title");
+  dom.modalSubtitle       = document.getElementById("modal-subtitle");
+  dom.modalDetails        = document.getElementById("modal-details");
+  dom.modalWhatsappButton = document.getElementById("modal-whatsapp-btn");
 
   injectAttendanceOverlay();
 }
@@ -303,30 +707,24 @@ function setupOverlayCanvas() {
 }
 
 // ─── Data ─────────────────────────────────────────────────────
-// loadSettings: only restores app settings from localStorage
 function loadSettings() {
   const config = typeof window.FACESCAN_CONFIG === "object" ? window.FACESCAN_CONFIG : {};
   const saved  = loadJson(STORAGE_KEYS.settings, {});
   state.settings = { ...DEFAULT_SETTINGS, ...config, ...saved };
 }
 
-// loadData: full localStorage fallback used when Firebase is unavailable
 function loadData() {
   loadSettings();
-
   const savedStudents =
     loadJson(STORAGE_KEYS.students, null) ?? loadJson(STORAGE_KEYS.legacyStudents, []);
   const savedAttendances =
     loadJson(STORAGE_KEYS.attendance, null) ?? loadJson(STORAGE_KEYS.legacyAttendance, []);
-
   state.students    = Array.isArray(savedStudents)
     ? savedStudents.map(normalizeStudent).filter(Boolean) : [];
   state.attendances = Array.isArray(savedAttendances)
     ? savedAttendances.map(normalizeAttendance).filter(Boolean) : [];
 }
 
-// saveData: persists settings to localStorage; triggers UI refresh.
-// Students and attendance are saved individually via Firebase helpers.
 function saveData() {
   localStorage.setItem(STORAGE_KEYS.settings, JSON.stringify(state.settings));
   updateDashboardStats();
@@ -334,10 +732,7 @@ function saveData() {
   renderAttendanceTable();
 }
 
-// saveDataLocalFallback: used only when Firebase is unavailable
 function saveDataLocalFallback() {
-  // NOTE: We do NOT call loadSettings() here. Settings are already in state.settings;
-  // re-loading from localStorage would unnecessarily overwrite any in-memory changes.
   localStorage.setItem(STORAGE_KEYS.students,   JSON.stringify(state.students));
   localStorage.setItem(STORAGE_KEYS.attendance, JSON.stringify(state.attendances));
   localStorage.setItem(STORAGE_KEYS.settings,   JSON.stringify(state.settings));
@@ -380,7 +775,7 @@ function showSection(section) {
     }
   } else {
     stopCamera();
-    if (section !== "register") resetRegisterCaptureUi();
+    if (section !== "register")   resetRegisterCaptureUi();
     if (section !== "attendance") resetAttendanceCaptureUi();
   }
   if (section === "records") showStudentsList();
@@ -404,7 +799,6 @@ async function startCamera(videoElement, mode) {
     await videoElement.play();
     return true;
   } catch (err) {
-    // Provide specific, actionable messages for each camera error type
     let message = "Camera access failed. ";
     if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
       message += "Permission was denied. Please allow camera access in your browser settings and reload.";
@@ -431,25 +825,22 @@ function stopCamera() {
     state.regFrameTimerId = null;
   }
   state.regCapturing = false;
-
-  if (state.currentStream) {
-    state.currentStream.getTracks().forEach(t => t.stop());
-  }
+  if (state.currentStream) state.currentStream.getTracks().forEach(t => t.stop());
   if (state.liveRecognitionTimerId) {
     clearInterval(state.liveRecognitionTimerId);
     state.liveRecognitionTimerId = null;
   }
-  state.currentStream             = null;
-  state.currentCameraMode         = null;
-  state.liveCandidateStudentId    = null;
-  state.liveCandidateStableCount  = 0;
-  state.liveRecognitionBusy       = false;
-  state.lastLandmarks             = null;
-  state.livenessFrameCount        = 0;
-  state.blinkDetected             = false;
-  state.livenessConfirmed         = false;
-  if (dom.registerVideo) dom.registerVideo.srcObject   = null;
-  if (dom.attendanceVideo) dom.attendanceVideo.srcObject = null;
+  state.currentStream            = null;
+  state.currentCameraMode        = null;
+  state.liveCandidateStudentId   = null;
+  state.liveCandidateStableCount = 0;
+  state.liveRecognitionBusy      = false;
+  state.lastLandmarks            = null;
+  state.livenessFrameCount       = 0;
+  state.blinkDetected            = false;
+  state.livenessConfirmed        = false;
+  if (dom.registerVideo)  dom.registerVideo.srcObject  = null;
+  if (dom.attendanceVideo)dom.attendanceVideo.srcObject= null;
   clearOverlayCanvas();
   syncAttendanceControls(false);
 }
@@ -502,7 +893,6 @@ function cancelDuplicateRegistration() {
 }
 
 // ─── MULTI-ANGLE REGISTRATION ─────────────────────────────────
-
 function startRegisterCamera() {
   startCamera(dom.registerVideo, "register").then(started => {
     if (!started) return;
@@ -514,10 +904,9 @@ function startRegisterCamera() {
 }
 
 function updateAngleUI() {
-  const idx = state.currentAngleIndex;
+  const idx   = state.currentAngleIndex;
   const angle = ANGLES[idx];
 
-  // Update step pills
   const pills = document.querySelectorAll(".angle-step-pill");
   pills.forEach((pill, i) => {
     pill.classList.remove(
@@ -526,21 +915,17 @@ function updateAngleUI() {
       "border-slate-600", "text-slate-500"
     );
     if (i < idx) {
-      // done
       pill.classList.add("border-emerald-500", "bg-emerald-500/10", "text-emerald-300");
       pill.textContent = ANGLES[i].label.replace(ANGLES[i].icon, "✓");
     } else if (i === idx) {
-      // active
       pill.classList.add("border-sky-500", "bg-sky-500/10", "text-sky-300");
       pill.textContent = ANGLES[i].label;
     } else {
-      // pending
       pill.classList.add("border-slate-600", "text-slate-500");
       pill.textContent = ANGLES[i].label;
     }
   });
 
-  // Update instruction
   const instrEl = document.getElementById("angle-instruction");
   if (instrEl) {
     instrEl.textContent = idx < ANGLES.length
@@ -548,7 +933,6 @@ function updateAngleUI() {
       : "All angles captured! Fill in details and register.";
   }
 
-  // Update capture button
   if (dom.captureAngleBtn) {
     if (idx < ANGLES.length) {
       dom.captureAngleBtn.textContent = `📸 Capture ${angle.label}`;
@@ -561,10 +945,7 @@ function updateAngleUI() {
 }
 
 async function captureCurrentAngle() {
-  if (!dom.registerVideo.srcObject) {
-    alert("Please start camera first.");
-    return;
-  }
+  if (!dom.registerVideo.srcObject) { alert("Please start camera first."); return; }
   const idx = state.currentAngleIndex;
   if (idx >= ANGLES.length) return;
 
@@ -583,10 +964,8 @@ async function captureCurrentAngle() {
       return;
     }
 
-    // Store angle data
     state.angleData[angle.key] = { descriptors, photo: bestFrameUrl };
 
-    // Update thumbnail
     const thumb = document.getElementById(`thumb-${angle.key}`);
     if (thumb) {
       thumb.innerHTML = `<img src="${bestFrameUrl}" class="w-full h-full object-cover rounded-2xl" alt="${angle.key}">`;
@@ -601,10 +980,7 @@ async function captureCurrentAngle() {
     state.currentAngleIndex += 1;
     updateAngleUI();
 
-    // If all 3 done, merge descriptors
-    if (state.currentAngleIndex >= ANGLES.length) {
-      mergeAngleDescriptors();
-    }
+    if (state.currentAngleIndex >= ANGLES.length) mergeAngleDescriptors();
   } catch (err) {
     dom.registerStatus.textContent = err.message;
     if (dom.captureAngleBtn) dom.captureAngleBtn.disabled = false;
@@ -618,10 +994,8 @@ function mergeAngleDescriptors() {
     if (d?.descriptors?.length) all.push(...d.descriptors);
   }
   state.registerDescriptors = all;
-  // Best photo = front
   state.registerPhoto = state.angleData.front?.photo || state.angleData.left?.photo || state.angleData.right?.photo;
 
-  // Show preview
   if (state.registerPhoto) {
     dom.registerPhotoPreview.src = state.registerPhoto;
     dom.registerPreview.classList.remove("hidden");
@@ -632,22 +1006,21 @@ function mergeAngleDescriptors() {
 
 async function captureAngleVideo(videoElement, canvasElement) {
   const collected = [];
-  const photos = [];
+  const photos    = [];
   const startTime = Date.now();
 
   return new Promise((resolve) => {
-    state.regCapturing = true;
+    state.regCapturing    = true;
     state.regFrameTimerId = setInterval(async () => {
       const elapsed = Date.now() - startTime;
       if (elapsed >= REG_VIDEO_DURATION_MS || collected.length >= REG_TARGET_EMBEDDINGS || !state.regCapturing) {
         clearInterval(state.regFrameTimerId);
         state.regFrameTimerId = null;
-        state.regCapturing = false;
+        state.regCapturing    = false;
         const final = storeMultipleEmbeddings(collected);
         resolve({ descriptors: final, bestFrameUrl: photos[0] || captureFrameAsDataUrl(videoElement, canvasElement) });
         return;
       }
-
       const result = await extractBestFrame(videoElement, canvasElement);
       if (result) {
         const { descriptor, dataUrl } = result;
@@ -660,25 +1033,23 @@ async function captureAngleVideo(videoElement, canvasElement) {
   });
 }
 
-// Keep old captureRegisterPhoto for backward compat, redirect to angle flow
 async function captureRegisterPhoto() {
   await captureCurrentAngle();
 }
 
 function resetAllAngles() {
-  state.currentAngleIndex = 0;
-  state.angleData = { front: null, left: null, right: null };
-  state.registerDescriptors = null;
-  state.registerPhoto = null;
+  state.currentAngleIndex     = 0;
+  state.angleData             = { front: null, left: null, right: null };
+  state.registerDescriptors   = null;
+  state.registerPhoto         = null;
   state.regCollectedDescriptors = [];
-  state.regCollectedPhotos = [];
-  state.isUpdateMode = false;
+  state.regCollectedPhotos    = [];
+  state.isUpdateMode          = false;
 
-  // Reset thumbnails
   for (const angle of ANGLES) {
     const thumb = document.getElementById(`thumb-${angle.key}`);
     if (thumb) {
-      thumb.innerHTML = `<span style="font-size:1.5rem;color:#475569;">${angle.icon}</span>`;
+      thumb.innerHTML    = `<span style="font-size:1.5rem;color:#475569;">${angle.icon}</span>`;
       thumb.style.borderColor = "";
       thumb.style.borderStyle = "dashed";
     }
@@ -692,7 +1063,7 @@ function resetAllAngles() {
 
   const submitBtn = document.getElementById("register-submit-btn");
   if (submitBtn) {
-    submitBtn.disabled = false;
+    submitBtn.disabled    = false;
     submitBtn.textContent = "✅ Register Student";
   }
 
@@ -700,9 +1071,7 @@ function resetAllAngles() {
   dom.registerStatus.textContent = "Angles reset. Start camera and capture again.";
 }
 
-function retakeRegisterPhoto() {
-  resetAllAngles();
-}
+function retakeRegisterPhoto() { resetAllAngles(); }
 
 // ─── Blur detection ───────────────────────────────────────────
 function computeLaplacianVariance(ctx, box, vw, vh) {
@@ -731,9 +1100,7 @@ function computeLaplacianVariance(ctx, box, vw, vh) {
       }
     }
     return count > 0 ? sumSq / count : 0;
-  } catch {
-    return 999;
-  }
+  } catch { return 999; }
 }
 
 async function extractBestFrame(videoElement, canvasElement) {
@@ -748,8 +1115,7 @@ async function extractBestFrame(videoElement, canvasElement) {
   const _faceapi = typeof faceapi !== "undefined" ? faceapi : window.faceapi;
   const detection = await _faceapi
     .detectSingleFace(videoElement, new _faceapi.TinyFaceDetectorOptions({
-      inputSize: 320,
-      scoreThreshold: REG_DETECTION_SCORE_MIN,
+      inputSize: 320, scoreThreshold: REG_DETECTION_SCORE_MIN,
     }))
     .withFaceLandmarks()
     .withFaceDescriptor();
@@ -757,10 +1123,10 @@ async function extractBestFrame(videoElement, canvasElement) {
   if (!detection) return null;
   if ((detection.detection?.score ?? 0) < REG_DETECTION_SCORE_MIN) return null;
 
-  const box     = detection.detection.box;
-  const faceArea  = box.width * box.height;
-  const frameArea = vw * vh;
-  const faceFrac  = faceArea / frameArea;
+  const box      = detection.detection.box;
+  const faceArea = box.width * box.height;
+  const frameArea= vw * vh;
+  const faceFrac = faceArea / frameArea;
   if (faceFrac < REG_MIN_FACE_FRACTION || faceFrac > REG_MAX_FACE_FRACTION) return null;
 
   const faceCenterX = (box.x + box.width  / 2) / vw;
@@ -817,10 +1183,8 @@ async function registerStudent(event) {
     return;
   }
 
-  // Merge all captured angle descriptors
   const allDescriptors = state.registerDescriptors || [];
   if (!allDescriptors.length) {
-    // Fall back to any captured angle
     for (const angle of ANGLES) {
       const d = state.angleData[angle.key];
       if (d?.descriptors?.length) allDescriptors.push(...d.descriptors);
@@ -829,22 +1193,27 @@ async function registerStudent(event) {
 
   const bestPhoto = state.registerPhoto ||
     state.angleData.front?.photo ||
-    state.angleData.left?.photo ||
+    state.angleData.left?.photo  ||
     state.angleData.right?.photo;
 
-  const studentId     = buildStudentId(className, roll);
+  const studentId = buildStudentId(className, roll);
   const existingStudent = state.students.find(s => s.id === studentId);
 
+  // Upload face photo to GitHub
+  dom.registerStatus.textContent = "Uploading photo to GitHub…";
+  const githubPhotoUrl = await saveStudentPhotoToGitHub(studentId, bestPhoto);
+
   const student = {
-    id: studentId,
+    id:           studentId,
     name,
     roll,
-    class: className,
+    class:        className,
     studentPhone,
     parentPhone,
-    facePhoto: bestPhoto || "",
-    descriptors: allDescriptors,
-    descriptor: averageDescriptors(allDescriptors),
+    facePhoto:    githubPhotoUrl || bestPhoto || "",
+    githubPhotoUrl,
+    descriptors:  allDescriptors,
+    descriptor:   averageDescriptors(allDescriptors),
     embeddingCount: allDescriptors.length,
     angleData: {
       front: state.angleData.front ? { count: state.angleData.front.descriptors?.length || 0, photo: state.angleData.front.photo } : null,
@@ -852,16 +1221,24 @@ async function registerStudent(event) {
       right: state.angleData.right ? { count: state.angleData.right.descriptors?.length || 0, photo: state.angleData.right.photo } : null,
     },
     registeredOn: existingStudent?.registeredOn || new Date().toISOString(),
-    updatedOn: new Date().toISOString(),
+    updatedOn:    new Date().toISOString(),
   };
 
   const idx = state.students.findIndex(e => e.id === studentId);
   if (idx === -1) state.students.unshift(student);
   else state.students[idx] = student;
 
-  // Save to Firebase (real-time listeners will update UI automatically)
-  await saveStudentToSheets(student);
-  saveDataLocalFallback();
+  // Save to Firebase
+  if (db) {
+    await saveStudentToFirebase(student);
+  } else {
+    saveDataLocalFallback();
+  }
+
+  // Save all student identities to GitHub (JSON + photo)
+  dom.registerStatus.textContent = "Saving identities to GitHub…";
+  void saveStudentsToGitHub(state.students);
+
   dom.registerForm.reset();
   resetAllAngles();
   stopCamera();
@@ -871,7 +1248,8 @@ async function registerStudent(event) {
 
   const submittedAngles = Object.values(state.angleData).filter(Boolean).length;
   dom.registerStatus.textContent =
-    `${student.name} registered with ${student.embeddingCount} face embeddings (${submittedAngles}/3 angles).`;
+    `${student.name} registered with ${student.embeddingCount} face embeddings (${submittedAngles}/3 angles).` +
+    (githubPhotoUrl ? " Photo saved to GitHub ✅" : "");
 
   void postToBackend("registerStudent", {
     student: {
@@ -883,13 +1261,12 @@ async function registerStudent(event) {
     },
   });
 
-  alert(`${student.name} registered with ${student.embeddingCount} face samples.`);
+  alert(`${student.name} registered with ${student.embeddingCount} face samples. Identity saved to GitHub.`);
   showSection("records");
   showStudentsList();
 }
 
 // ─── ATTENDANCE SCANNING ──────────────────────────────────────
-
 async function startAttendanceCamera() {
   if (!state.students.length) {
     dom.attendanceStatus.textContent = "Register at least one student before attendance scan.";
@@ -930,8 +1307,8 @@ function syncAttendanceControls(cameraStarted) {
 
 function setAttendanceConfirmState(enabled, label) {
   dom.captureAttendanceButton.disabled = !enabled;
-  dom.captureAttendanceButton.classList.toggle("opacity-60",        !enabled);
-  dom.captureAttendanceButton.classList.toggle("cursor-not-allowed",!enabled);
+  dom.captureAttendanceButton.classList.toggle("opacity-60",         !enabled);
+  dom.captureAttendanceButton.classList.toggle("cursor-not-allowed", !enabled);
   dom.captureAttendanceButton.innerHTML = label || "✅ Confirm &amp; Save Attendance";
   syncAttendanceControls(true);
 }
@@ -954,9 +1331,8 @@ async function runLiveRecognition() {
   try {
     const _faceapi = typeof faceapi !== "undefined" ? faceapi : window.faceapi;
     const detections = await _faceapi
-      .detectAllFaces(
-        dom.attendanceVideo,
-        new _faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.5 }),
+      .detectAllFaces(dom.attendanceVideo,
+        new _faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.5 })
       )
       .withFaceLandmarks()
       .withFaceDescriptors();
@@ -1044,7 +1420,6 @@ async function runLiveRecognition() {
       dom.attendanceStatus.textContent +=
         ` — ⚠ ${faces.length} faces detected, using closest.`;
     }
-
   } catch (err) {
     dom.attendanceStatus.textContent = err.message;
   } finally {
@@ -1053,14 +1428,9 @@ async function runLiveRecognition() {
 }
 
 function rankStudentsByMultiEmbedding(descriptor, dynThreshold) {
-  const threshold = dynThreshold ?? Number(state.settings.matchThreshold);
-
-  const withDescriptors = state.students.filter(s =>
-    Array.isArray(s.descriptors) && s.descriptors.length > 0
-  );
-  const legacyOnly = state.students.filter(s =>
-    !Array.isArray(s.descriptors) && Array.isArray(s.descriptor)
-  );
+  const threshold     = dynThreshold ?? Number(state.settings.matchThreshold);
+  const withDescriptors = state.students.filter(s => Array.isArray(s.descriptors) && s.descriptors.length > 0);
+  const legacyOnly      = state.students.filter(s => !Array.isArray(s.descriptors) && Array.isArray(s.descriptor));
 
   const ranked = [
     ...withDescriptors.map(student => {
@@ -1106,7 +1476,7 @@ function checkLiveness(detection) {
     const earNow  = computeEAR(landmarks);
     const earPrev = computeEAR(state.lastLandmarks);
     if (earPrev > 0.25 && earNow < earPrev / LIVE_BLINK_EYE_DIFF_THRESHOLD) {
-      state.blinkDetected     = true;
+      state.blinkDetected      = true;
       state.livenessFrameCount = Math.max(
         state.livenessFrameCount,
         LIVE_LIVENESS_FRAMES_REQUIRED - 1
@@ -1137,9 +1507,7 @@ function computeEAR(positions) {
     const leftEye  = positions.slice(36, 42);
     const rightEye = positions.slice(42, 48);
     return (ear(leftEye) + ear(rightEye)) / 2;
-  } catch {
-    return 0.3;
-  }
+  } catch { return 0.3; }
 }
 
 function dist2d(a, b) {
@@ -1159,7 +1527,7 @@ function drawFaceBoxes(faces) {
   const sh = dom.faceOverlay.height / vh;
 
   faces.forEach((face, idx) => {
-    const box = face.detection.box;
+    const box   = face.detection.box;
     const x = box.x * sw, y = box.y * sh;
     const w = box.width * sw, h = box.height * sh;
     const color = idx === 0 ? "#0ea5e9" : "#f59e0b";
@@ -1194,10 +1562,7 @@ function clearOverlayCanvas() {
 
 // ─── Attendance confirm & save ────────────────────────────────
 async function captureAttendancePhoto() {
-  if (!dom.attendanceVideo.srcObject) {
-    alert("Please start camera first.");
-    return;
-  }
+  if (!dom.attendanceVideo.srcObject) { alert("Please start camera first."); return; }
 
   await runLiveRecognition();
 
@@ -1242,53 +1607,39 @@ async function captureAttendancePhoto() {
     matchDistance: matchInfo?.distance != null && isFinite(matchInfo.distance)
       ? Number(matchInfo.distance.toFixed(4)) : null,
     matchPercent: matchPct,
-    syncState:    state.settings.appsScriptUrl ? "submitted" : "local-only",
+    syncState:    "pending",
   };
 
   state.attendances.unshift(record);
 
-  // Save attendance to Firebase (real-time listener updates UI automatically)
-  if (false) { // no Firebase
-    await saveAttendanceToSheets(record);
-    saveDataLocalFallback();
-    record.syncState = "sheets-synced";
+  // 1. Save to Firebase
+  if (db) {
+    await saveAttendanceToFirebase(record);
+    record.syncState = "firebase-synced";
   } else {
     saveDataLocalFallback();
   }
 
-  const syncResult = await postToBackend("logAttendance", {
-    attendance: {
-      attendanceId:  record.id,
-      studentId:     record.studentId,
-      name:          record.name,
-      rollNumber:    record.roll,
-      className:     record.class,
-      studentMobile: record.studentPhone,
-      parentMobile:  record.parentPhone,
-      scannedAt:     record.timestamp,
-      dateKey:       record.dateKey,
-      dateLabel:     record.dateLabel,
-      timeLabel:     record.timeLabel,
-      matchDistance: record.matchDistance || 0,
-      matchPercent:  record.matchPercent  || 0,
-    },
-  });
-
-  if (false) { // Google Sheets handles sync
-    record.syncState = syncResult.ok
-      ? (state.settings.appsScriptUrl ? "submitted" : "local-only")
-      : "failed";
-    saveDataLocalFallback();
+  // 2. Log to Google Sheets
+  dom.attendanceStatus.textContent = "Saving to Google Sheets…";
+  const sheetsResult = await logAttendanceToGoogleSheets(record);
+  if (sheetsResult.ok) {
+    record.syncState = db ? "firebase+sheets" : "sheets-submitted";
   }
-  showSuccessModal(record);
 
-  dom.attendanceStatus.textContent = `Attendance saved for ${student.name}. Ready for next scan.`;
-  state.attendancePhoto = null;
-  state.selectedAttendanceStudentId = null;
-  state.livenessFrameCount  = 0;
-  state.blinkDetected       = false;
-  state.livenessConfirmed   = false;
-  state.lastLandmarks       = null;
+  // 3. Send WhatsApp to both admin numbers + parent (auto, via Twilio)
+  dom.attendanceStatus.textContent = "Sending WhatsApp notifications…";
+  void sendAttendanceWhatsApp(record);
+
+  showSuccessModal(record);
+  dom.attendanceStatus.textContent = `Attendance saved for ${student.name}. Notifications sent. Ready for next scan.`;
+
+  state.attendancePhoto              = null;
+  state.selectedAttendanceStudentId  = null;
+  state.livenessFrameCount           = 0;
+  state.blinkDetected                = false;
+  state.livenessConfirmed            = false;
+  state.lastLandmarks                = null;
   setTimeout(() => void runLiveRecognition(), 250);
 }
 
@@ -1322,8 +1673,7 @@ function renderMatchList(matches) {
   } else if (selectedId) {
     const pct = Math.round(distanceToPercent(bestMatch.distance));
     dom.recognitionTitle.textContent = `Identified: ${bestMatch.student.name}`;
-    dom.recognitionCopy.textContent  =
-      `${pct}% match confirmed across ${state.liveCandidateStableCount} frames. Tap confirm.`;
+    dom.recognitionCopy.textContent  = `${pct}% match confirmed across ${state.liveCandidateStableCount} frames. Tap confirm.`;
     setAttendanceConfirmState(true, `✅ Confirm ${escapeHtml(bestMatch.student.name)}`);
   } else {
     const pct = Math.round(distanceToPercent(bestMatch.distance));
@@ -1343,9 +1693,9 @@ function renderMatchList(matches) {
     card.type      = "button";
     card.className =
       `match-card bg-slate-900 rounded-3xl p-4 flex gap-4 items-center border-2 text-left ${
-        isSelected  ? "border-sky-400 bg-slate-700/80" :
-        isSelectable? "border-transparent" :
-                      "border-red-500/30 bg-slate-900/70 opacity-80"
+        isSelected   ? "border-sky-400 bg-slate-700/80" :
+        isSelectable ? "border-transparent" :
+                       "border-red-500/30 bg-slate-900/70 opacity-80"
       }`;
     card.disabled = true;
     card.dataset.studentId = match.student.id;
@@ -1382,9 +1732,10 @@ function showSuccessModal(record) {
     `✅ Attendance Marked!<br><span class="text-emerald-400">${escapeHtml(record.name)}</span>`;
   dom.modalSubtitle.textContent = `Roll ${record.roll} · ${record.class}`;
 
-  const syncText  = record.syncState === "failed"         ? "Failed" :
-                    record.syncState === "submitted"       ? "Requested" :
-                    record.syncState === "sheets-synced" ? "Sheets Synced" : "Saved locally";
+  const syncText  = record.syncState === "failed"           ? "Failed" :
+                    record.syncState === "sheets-submitted"  ? "Google Sheets ✅" :
+                    record.syncState === "firebase+sheets"   ? "Firebase + Sheets ✅" :
+                    record.syncState === "firebase-synced"   ? "Firebase Synced" : "Saved locally";
   const syncColor = record.syncState === "failed" ? "text-red-400" : "text-emerald-400";
   const matchInfo = record.matchPercent !== null && record.matchPercent !== undefined
     ? `${record.matchPercent}% confidence`
@@ -1403,9 +1754,13 @@ function showSuccessModal(record) {
       <span class="text-slate-400">Face Match</span>
       <span class="font-medium">${matchInfo}</span>
     </div>
-    <div class="flex justify-between py-2">
+    <div class="flex justify-between py-2 border-b border-slate-700">
       <span class="text-slate-400">Google Sheet</span>
       <span class="${syncColor} font-medium">${escapeHtml(syncText)}</span>
+    </div>
+    <div class="flex justify-between py-2">
+      <span class="text-slate-400">WhatsApp</span>
+      <span class="text-emerald-400 font-medium">Sent to Admin + Parent 📱</span>
     </div>
   `;
 
@@ -1443,11 +1798,8 @@ function showStudentsList() {
   dom.showStudentsButton.classList.remove("bg-slate-800");
   dom.showAttendanceButton.classList.remove("bg-sky-500","text-white");
   dom.showAttendanceButton.classList.add("bg-slate-800");
-
-  // Hide export buttons when students tab active
   document.getElementById("export-csv-btn")?.classList.add("hidden");
   document.getElementById("export-pdf-btn")?.classList.add("hidden");
-
   renderStudentsGrid();
 }
 
@@ -1460,19 +1812,20 @@ function renderStudentsGrid() {
   }
   state.students.forEach(student => {
     const card = document.createElement("div");
-    card.className =
-      "bg-slate-900 border border-slate-700 hover:border-sky-400 rounded-3xl p-5 transition-all";
+    card.className = "bg-slate-900 border border-slate-700 hover:border-sky-400 rounded-3xl p-5 transition-all";
 
     const embBadge = student.embeddingCount
       ? `<div class="text-xs text-sky-400 mt-1">🧠 ${student.embeddingCount} face samples</div>` : "";
 
-    // Angle badges
     const angleInfo = student.angleData
       ? Object.entries(student.angleData)
           .filter(([, v]) => v)
           .map(([k]) => `<span class="inline-block bg-emerald-500/10 text-emerald-400 text-xs px-2 py-0.5 rounded-lg">${k}</span>`)
           .join("")
       : "";
+
+    const githubBadge = student.githubPhotoUrl
+      ? `<div class="text-xs text-purple-400 mt-1">🐙 Saved on GitHub</div>` : "";
 
     card.innerHTML = `
       <img src="${escapeHtml(student.facePhoto||"")}"
@@ -1484,6 +1837,7 @@ function renderStudentsGrid() {
         <span class="font-medium">${escapeHtml(student.class)}</span>
       </div>
       ${embBadge}
+      ${githubBadge}
       ${angleInfo ? `<div class="flex gap-1 flex-wrap mt-2">${angleInfo}</div>` : ""}
       <div class="text-xs text-slate-400 mt-4 space-y-1">
         <div>📱 Student: ${escapeHtml(student.studentPhone||"-")}</div>
@@ -1513,11 +1867,8 @@ function showAttendanceList() {
   dom.showAttendanceButton.classList.remove("bg-slate-800");
   dom.showStudentsButton.classList.remove("bg-sky-500","text-white");
   dom.showStudentsButton.classList.add("bg-slate-800");
-
-  // Show export buttons
   document.getElementById("export-csv-btn")?.classList.remove("hidden");
   document.getElementById("export-pdf-btn")?.classList.remove("hidden");
-
   renderAttendanceTable();
 }
 
@@ -1531,9 +1882,9 @@ function renderAttendanceTable() {
   state.attendances.forEach(record => {
     const row = document.createElement("tr");
     row.className = "border-b border-slate-700 last:border-none hover:bg-slate-800/50";
-    const matchLabel = record.matchPercent !== null && record.matchPercent !== undefined
+    const matchLabel   = record.matchPercent !== null && record.matchPercent !== undefined
       ? `${record.matchPercent}%` : "";
-    const actionLabel = record.syncState === "failed" ? "Retry WhatsApp" : "Send again";
+    const actionLabel  = record.syncState === "failed" ? "Retry WhatsApp" : "Send again";
     row.innerHTML = `
       <td class="px-6 py-5">${escapeHtml(record.formattedTime)}</td>
       <td class="px-6 py-5 font-medium">${escapeHtml(record.name)}${matchLabel ? `<span class="ml-2 text-xs text-emerald-400">${matchLabel}</span>` : ""}</td>
@@ -1566,27 +1917,31 @@ function renderAttendanceTable() {
 
 function mockSendWhatsAppFromLog(recordId) {
   const record = state.attendances.find(e => e.id === recordId);
-  if (record) openWhatsappForRecord(record);
+  if (record) {
+    // Try Twilio first, fallback to wa.me
+    sendAttendanceWhatsApp(record);
+  }
 }
 
-// ─── DELETE STUDENT ──────────────────────────────────────────
+// ─── DELETE STUDENT ───────────────────────────────────────────
 async function deleteStudent(studentId) {
   const student = state.students.find(s => s.id === studentId);
   if (!student) return;
   if (!confirm(`Delete student "${student.name}" (Roll: ${student.roll})?\n\nThis will also remove their attendance records.`)) return;
 
-  // Capture attendance records to delete BEFORE filtering them out of state
   const attToDelete = state.attendances.filter(a => a.studentId === studentId);
-
   state.students    = state.students.filter(s => s.id !== studentId);
   state.attendances = state.attendances.filter(a => a.studentId !== studentId);
 
-  {
-    await deleteStudentFromSheets(studentId);
-    await Promise.all(attToDelete.map(a => deleteAttendanceFromSheets(a.id)));
+  if (db) {
+    await deleteStudentFromFirebase(studentId);
+    await Promise.all(attToDelete.map(a => deleteAttendanceFromFirebase(a.id)));
   } else {
     saveDataLocalFallback();
   }
+
+  // Update GitHub students.json
+  void saveStudentsToGitHub(state.students);
 }
 
 // ─── DELETE ATTENDANCE RECORD ─────────────────────────────────
@@ -1597,8 +1952,8 @@ async function deleteAttendanceRecord(recordId) {
 
   state.attendances = state.attendances.filter(r => r.id !== recordId);
 
-  if (false) { // no Firebase
-    await deleteAttendanceFromSheets(recordId);
+  if (db) {
+    await deleteAttendanceFromFirebase(recordId);
   } else {
     saveDataLocalFallback();
     renderAttendanceTable();
@@ -1610,12 +1965,12 @@ function openEditModal(studentId) {
   const student = state.students.find(s => s.id === studentId);
   if (!student) return;
 
-  document.getElementById("edit-student-id").value      = student.id;
-  document.getElementById("edit-name").value            = student.name;
-  document.getElementById("edit-roll").value            = student.roll;
-  document.getElementById("edit-class").value           = student.class;
-  document.getElementById("edit-student-phone").value   = student.studentPhone || "";
-  document.getElementById("edit-parent-phone").value    = student.parentPhone  || "";
+  document.getElementById("edit-student-id").value    = student.id;
+  document.getElementById("edit-name").value          = student.name;
+  document.getElementById("edit-roll").value          = student.roll;
+  document.getElementById("edit-class").value         = student.class;
+  document.getElementById("edit-student-phone").value = student.studentPhone || "";
+  document.getElementById("edit-parent-phone").value  = student.parentPhone  || "";
 
   document.getElementById("edit-student-modal").classList.remove("hidden");
 }
@@ -1642,46 +1997,40 @@ async function saveEditStudent() {
 
   state.students[idx] = {
     ...state.students[idx],
-    name,
-    roll,
+    name, roll,
     class: className,
-    studentPhone,
-    parentPhone,
+    studentPhone, parentPhone,
     updatedOn: new Date().toISOString(),
   };
 
-  // Also update name/roll/class in existing attendance records
   state.attendances = state.attendances.map(a =>
     a.studentId === id
       ? { ...a, name, roll, class: className, studentPhone, parentPhone }
       : a
   );
 
-  if (false) { // no Firebase
-    await saveStudentToSheets(state.students[idx]);
-    // Update affected attendance records in Firestore
+  if (db) {
+    await saveStudentToFirebase(state.students[idx]);
     const affected = state.attendances.filter(a => a.studentId === id);
-    await Promise.all(affected.map(a => saveAttendanceToSheets(a)));
+    await Promise.all(affected.map(a => saveAttendanceToFirebase(a)));
   } else {
     saveDataLocalFallback();
   }
+
+  // Sync updated list to GitHub
+  void saveStudentsToGitHub(state.students);
   closeEditModal();
 }
 
 // ─── EXPORT CSV ───────────────────────────────────────────────
 function exportAttendanceCSV() {
-  if (!state.attendances.length) {
-    alert("No attendance records to export.");
-    return;
-  }
+  if (!state.attendances.length) { alert("No attendance records to export."); return; }
 
-  const headers = ["Date", "Time", "Student Name", "Roll No", "Class", "Student Phone", "Parent Phone", "Match %", "Sync Status"];
+  const headers = ["Date","Time","Student Name","Roll No","Class","Student Phone","Parent Phone","Match %","Sync Status"];
   const rows = state.attendances.map(r => [
-    r.dateLabel    || r.date,
-    r.timeLabel    || "",
-    r.name,
-    r.roll,
-    r.class,
+    r.dateLabel || r.date,
+    r.timeLabel || "",
+    r.name, r.roll, r.class,
     r.studentPhone || "",
     r.parentPhone  || "",
     r.matchPercent != null ? `${r.matchPercent}%` : "",
@@ -1703,15 +2052,11 @@ function exportAttendanceCSV() {
 
 // ─── EXPORT PDF ───────────────────────────────────────────────
 function exportAttendancePDF() {
-  if (!state.attendances.length) {
-    alert("No attendance records to export.");
-    return;
-  }
+  if (!state.attendances.length) { alert("No attendance records to export."); return; }
 
   const instituteName = escapeHtml(state.settings.instituteName || "FaceScan Attendance");
   const exportDate    = formatDateTime(new Date());
 
-  // Build table rows
   const tableRows = state.attendances.map((r, i) => `
     <tr style="background:${i % 2 === 0 ? "#f8fafc" : "#fff"};">
       <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0;">${escapeHtml(r.dateLabel || r.date)}</td>
@@ -1741,10 +2086,7 @@ function exportAttendancePDF() {
     thead th { padding: 10px 12px; text-align: left; font-weight: 600; }
     tbody tr:hover { background: #f0f9ff !important; }
     .footer { margin-top: 24px; text-align: center; font-size: 0.8rem; color: #94a3b8; }
-    @media print {
-      body { padding: 0; }
-      .no-print { display: none; }
-    }
+    @media print { body { padding: 0; } .no-print { display: none; } }
   </style>
 </head>
 <body>
@@ -1759,9 +2101,7 @@ function exportAttendancePDF() {
   </div>
   <table>
     <thead>
-      <tr>
-        <th>Date</th><th>Time</th><th>Student</th><th>Roll No</th><th>Class</th><th>Match %</th><th>Status</th>
-      </tr>
+      <tr><th>Date</th><th>Time</th><th>Student</th><th>Roll No</th><th>Class</th><th>Match %</th><th>Status</th></tr>
     </thead>
     <tbody>${tableRows}</tbody>
   </table>
@@ -1777,7 +2117,6 @@ function exportAttendancePDF() {
   const url  = URL.createObjectURL(blob);
   const win  = window.open(url, "_blank");
   if (!win) {
-    // Fallback: download the HTML
     const a    = document.createElement("a");
     a.href     = url;
     a.download = `attendance_report_${getLocalDateKey(new Date())}.html`;
@@ -1788,14 +2127,31 @@ function exportAttendancePDF() {
 
 // ─── Reset / Clear ────────────────────────────────────────────
 async function clearAllData() {
-  if (!confirm("Reset all demo data? This will delete ALL records too.")) return;
+  if (!confirm("Reset all data? This will delete ALL records from Firebase and GitHub too.")) return;
 
   [STORAGE_KEYS.students, STORAGE_KEYS.attendance,
    STORAGE_KEYS.legacyStudents, STORAGE_KEYS.legacyAttendance].forEach(k =>
     localStorage.removeItem(k)
   );
 
-  // Google Sheets data is not auto-cleared — user can clear the sheet manually
+  if (db) {
+    showLoadingBanner("Clearing Firebase data...");
+    try {
+      const { collection, getDocs, deleteDoc, doc } = window._fs;
+      const [stuSnap, attSnap] = await Promise.all([
+        getDocs(collection(db, "students")),
+        getDocs(collection(db, "attendance")),
+      ]);
+      await Promise.all([
+        ...stuSnap.docs.map(d => deleteDoc(doc(db, "students",   d.id))),
+        ...attSnap.docs.map(d => deleteDoc(doc(db, "attendance", d.id))),
+      ]);
+    } catch (err) { console.error("clearAllData Firebase error:", err); }
+    hideLoadingBanner();
+  }
+
+  // Clear GitHub students.json
+  void saveStudentsToGitHub([]);
 
   state.students             = [];
   state.attendances          = [];
@@ -1814,7 +2170,7 @@ async function clearAllData() {
   resetAttendanceCaptureUi();
   saveData();
   showSection("home");
-  alert("All saved demo data has been cleared.");
+  alert("All saved data has been cleared.");
 }
 
 function resetRegisterCaptureUi(preserveLiveCamera = false) {
@@ -1840,10 +2196,10 @@ function resetAttendanceCaptureUi() {
 }
 
 function resetLiveRecognitionSelection() {
-  state.liveMatches                = [];
+  state.liveMatches                 = [];
   state.selectedAttendanceStudentId = null;
-  state.liveCandidateStudentId     = null;
-  state.liveCandidateStableCount   = 0;
+  state.liveCandidateStudentId      = null;
+  state.liveCandidateStableCount    = 0;
 }
 
 // ─── Model loading (lazy, cached) ────────────────────────────
@@ -1853,11 +2209,8 @@ async function ensureModels() {
   if (state.modelsLoaded) return;
   if (_modelLoadPromise.current) return _modelLoadPromise.current;
 
-  // In module scope, faceapi loaded via plain <script> tag lives on window
   const _faceapi = typeof faceapi !== "undefined" ? faceapi : window.faceapi;
-  if (!_faceapi) {
-    throw new Error("Face recognition library did not load. Check your internet connection.");
-  }
+  if (!_faceapi) throw new Error("Face recognition library did not load. Check your internet connection.");
 
   _modelLoadPromise.current = (async () => {
     const url = normalizeModelUrl(state.settings.modelUrl);
@@ -1889,7 +2242,7 @@ function captureFrameAsDataUrl(videoElement, canvasElement) {
   return canvasElement.toDataURL("image/jpeg", 0.85);
 }
 
-// ─── Descriptor math ─────────────────────────────────────────
+// ─── Descriptor math ──────────────────────────────────────────
 function averageDescriptors(descriptors) {
   if (!descriptors?.length) return null;
   const len = descriptors[0]?.length || 0;
@@ -1926,40 +2279,10 @@ function isSelectableMatch(match, threshold) {
   );
 }
 
-// ─── Backend sync ─────────────────────────────────────────────
-async function postToBackend(action, payload) {
-  if (!state.settings.appsScriptUrl) return { ok: true, mode: "local-only" };
-  try {
-    // NOTE: mode:"no-cors" is required for Google Apps Script but produces an opaque response.
-    // This means we cannot read the response body or status code — the fetch will appear to
-    // "succeed" even if the server returns an error. We therefore always return mode:"submitted"
-    // (not "synced") to indicate the request was sent, not that it was confirmed received.
-    await fetch(state.settings.appsScriptUrl, {
-      method: "POST",
-      mode:   "no-cors",
-      headers:{ "Content-Type": "text/plain;charset=utf-8" },
-      body:   JSON.stringify({
-        action,
-        instituteName: state.settings.instituteName,
-        deviceLabel:   state.settings.deviceLabel,
-        sentAt:        new Date().toISOString(),
-        ...payload,
-      }),
-    });
-    // "submitted" intentionally — not "synced" — because no-cors gives no confirmation
-    return { ok: true, mode: "submitted" };
-  } catch (err) {
-    console.error("postToBackend network error:", err);
-    return { ok: false, error: err };
-  }
-}
-
 // ─── Data normalization ───────────────────────────────────────
 function normalizeStudent(student) {
   if (!student) return null;
 
-  // Descriptors may be stored as comma-joined strings (new format) or plain arrays (old format).
-  // Deserialize either format back into plain number arrays for face-api.js.
   const deserializeDesc = d => {
     if (!d) return null;
     if (typeof d === "string") return d.split(",").map(Number);
@@ -1975,19 +2298,20 @@ function normalizeStudent(student) {
   const descriptor = deserializeDesc(student.descriptor);
 
   return {
-    id:           String(student.id || buildStudentId(student.className || student.class, student.roll || student.rollNumber)),
-    name:         String(student.name || ""),
-    roll:         String(student.roll || student.rollNumber || ""),
-    class:        String(student.class || student.className || ""),
-    studentPhone: String(student.studentPhone || student.studentMobile || ""),
-    parentPhone:  String(student.parentPhone  || student.parentMobile  || ""),
-    facePhoto:    String(student.facePhoto || ""),
+    id:             String(student.id || buildStudentId(student.className || student.class, student.roll || student.rollNumber)),
+    name:           String(student.name || ""),
+    roll:           String(student.roll || student.rollNumber || ""),
+    class:          String(student.class || student.className || ""),
+    studentPhone:   String(student.studentPhone || student.studentMobile || ""),
+    parentPhone:    String(student.parentPhone  || student.parentMobile  || ""),
+    facePhoto:      String(student.facePhoto || ""),
+    githubPhotoUrl: String(student.githubPhotoUrl || ""),
     descriptors,
     descriptor,
     embeddingCount: student.embeddingCount || descriptors?.length || (descriptor ? 1 : 0),
-    angleData:    student.angleData || null,
-    registeredOn: String(student.registeredOn || student.registeredAt || new Date().toISOString()),
-    updatedOn:    String(student.updatedOn    || student.updatedAt    || new Date().toISOString()),
+    angleData:      student.angleData || null,
+    registeredOn:   String(student.registeredOn || student.registeredAt || new Date().toISOString()),
+    updatedOn:      String(student.updatedOn    || student.updatedAt    || new Date().toISOString()),
   };
 }
 
@@ -1995,11 +2319,7 @@ function normalizeAttendance(record) {
   if (!record) return null;
   const timestamp = record.timestamp || record.scannedAt || new Date().toISOString();
   const date      = new Date(timestamp);
-  // FIX: Use a deterministic ID derived from studentId + timestamp so that
-  // repeated calls to normalizeAttendance on the same record always produce the
-  // same ID. Using Date.now() here caused a new ID on every call, breaking
-  // deduplication and Firestore document targeting.
-  const stableId = record.id || record.attendanceId ||
+  const stableId  = record.id || record.attendanceId ||
     `ATT-${String(record.studentId || "unknown").replace(/[^a-z0-9]/gi, "")}-${new Date(timestamp).getTime()}`;
   return {
     id:           String(stableId),
@@ -2022,7 +2342,7 @@ function normalizeAttendance(record) {
   };
 }
 
-// ─── Utility ─────────────────────────────────────────────────
+// ─── Utility ──────────────────────────────────────────────────
 function buildStudentId(className, rollNumber) {
   return `${slugify(className)}-${slugify(rollNumber) || Date.now()}`;
 }
@@ -2083,34 +2403,30 @@ function escapeHtml(value) {
     .replaceAll("'",  "&#39;");
 }
 
+// ─── Expose to global scope for inline HTML onclick handlers ──
+window.showSection                   = showSection;
+window.startRegisterCamera           = startRegisterCamera;
+window.captureCurrentAngle           = captureCurrentAngle;
+window.captureRegisterPhoto          = captureRegisterPhoto;
+window.resetAllAngles                = resetAllAngles;
+window.retakeRegisterPhoto           = retakeRegisterPhoto;
+window.registerStudent               = registerStudent;
+window.checkExistingStudent          = checkExistingStudent;
+window.proceedAsUpdate               = proceedAsUpdate;
+window.cancelDuplicateRegistration   = cancelDuplicateRegistration;
+window.startAttendanceCamera         = startAttendanceCamera;
+window.captureAttendancePhoto        = captureAttendancePhoto;
+window.showStudentsList              = showStudentsList;
+window.showAttendanceList            = showAttendanceList;
+window.openEditModal                 = openEditModal;
+window.closeEditModal                = closeEditModal;
+window.saveEditStudent               = saveEditStudent;
+window.deleteStudent                 = deleteStudent;
+window.deleteAttendanceRecord        = deleteAttendanceRecord;
+window.hideModal                     = hideModal;
+window.sendWhatsAppMessage           = sendWhatsAppMessage;
+window.exportAttendanceCSV           = exportAttendanceCSV;
+window.exportAttendancePDF           = exportAttendancePDF;
+window.clearAllData                  = clearAllData;
 
-// ─── Expose functions to global scope for inline HTML onclick handlers ────────
-// Required because this file runs as type="module" which has its own scope.
-window.showSection               = showSection;
-window.startRegisterCamera       = startRegisterCamera;
-window.captureCurrentAngle       = captureCurrentAngle;
-window.captureRegisterPhoto      = captureRegisterPhoto;
-window.resetAllAngles            = resetAllAngles;
-window.retakeRegisterPhoto       = retakeRegisterPhoto;
-window.registerStudent           = registerStudent;
-window.checkExistingStudent      = checkExistingStudent;
-window.proceedAsUpdate           = proceedAsUpdate;
-window.cancelDuplicateRegistration = cancelDuplicateRegistration;
-window.startAttendanceCamera     = startAttendanceCamera;
-window.captureAttendancePhoto    = captureAttendancePhoto;
-window.showStudentsList          = showStudentsList;
-window.showAttendanceList        = showAttendanceList;
-window.openEditModal             = openEditModal;
-window.closeEditModal            = closeEditModal;
-window.saveEditStudent           = saveEditStudent;
-window.deleteStudent             = deleteStudent;
-window.deleteAttendanceRecord    = deleteAttendanceRecord;
-window.hideModal                 = hideModal;
-window.sendWhatsAppMessage       = sendWhatsAppMessage;
-window.exportAttendanceCSV       = exportAttendanceCSV;
-window.exportAttendancePDF       = exportAttendancePDF;
-window.clearAllData              = clearAllData;
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
+function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
