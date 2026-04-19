@@ -1841,7 +1841,7 @@ function renderStudentsGrid() {
       ${angleInfo ? `<div class="flex gap-1 flex-wrap mt-2">${angleInfo}</div>` : ""}
       <div class="text-xs text-slate-400 mt-4 space-y-1">
         <div>📱 Student: ${escapeHtml(student.studentPhone||"-")}</div>
-        <div>👨‍👩‍👧 Parent: ${escapeHtml(student.parentPhone||"-")}</div>
+        <div>&#128106; Parent: ${escapeHtml(student.parentPhone||"-")}</div>
       </div>
       <div class="flex gap-2 mt-4">
         <button type="button"
