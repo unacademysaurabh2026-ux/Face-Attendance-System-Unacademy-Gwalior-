@@ -18,7 +18,7 @@ const SHEETS_CONFIG = {
   spreadsheetId: "1Dzqhmah07HTiEIIORcH0USpZ1R6KQVPfrWerNnZiw4Q",
   // Apps Script Web App URL – deploy your Apps Script and paste URL here
   // See README in the repo for setup instructions.
-  appsScriptUrl: "",   // set via Settings or window.FACESCAN_CONFIG
+  appsScriptUrl: "https://script.google.com/macros/s/AKfycbz3WUvgNN48XR5o4P-IrCubls-nUYGEFdwWKnt9kpIQmLDg0L0otrcazohiHU3ce_QxQg/exec",   // set via Settings or window.FACESCAN_CONFIG
 };
 
 // ─── Twilio WhatsApp Configuration ───────────────────────────
